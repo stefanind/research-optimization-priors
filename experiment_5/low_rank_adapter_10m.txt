@@ -1,0 +1,132 @@
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:80
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+model_params:17190985
+world_size:8 grad_accum_steps:1
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+bigram_adapter_rank:64 bigram_adapter_lr:0.04 bigram_adapter_init_mode:svd bigram_adapter_init_path:./bigram_prior.npz bigram_adapter_init_scale:1.0 bigram_adapter_scale_init:0.1
+train_batch_tokens:524288 train_seq_len:1024 iterations:20000 warmup_steps:20 max_wallclock_seconds:600.000
+seed:1337
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/20000 val_loss:6.5456 val_bpb:3.8767 train_time:0ms step_avg:0.02ms
+step:1/20000 train_loss:6.5480 train_time:24ms step_avg:24.18ms
+step:2/20000 train_loss:16.9705 train_time:66ms step_avg:33.01ms
+step:3/20000 train_loss:8.6193 train_time:115ms step_avg:38.31ms
+step:4/20000 train_loss:6.5796 train_time:163ms step_avg:40.83ms
+step:5/20000 train_loss:6.5771 train_time:212ms step_avg:42.30ms
+step:6/20000 train_loss:7.4553 train_time:260ms step_avg:43.35ms
+step:7/20000 train_loss:6.2993 train_time:309ms step_avg:44.11ms
+step:8/20000 train_loss:5.9663 train_time:357ms step_avg:44.68ms
+step:9/20000 train_loss:5.7321 train_time:406ms step_avg:45.09ms
+step:10/20000 train_loss:5.5030 train_time:454ms step_avg:45.42ms
+step:200/20000 train_loss:2.9069 train_time:8838ms step_avg:44.19ms
+step:400/20000 train_loss:2.3753 train_time:17660ms step_avg:44.15ms
+step:600/20000 train_loss:2.5659 train_time:26503ms step_avg:44.17ms
+step:800/20000 train_loss:2.3043 train_time:35349ms step_avg:44.19ms
+step:1000/20000 train_loss:2.3768 train_time:44195ms step_avg:44.19ms
+step:1000/20000 val_loss:2.3420 val_bpb:1.3871 train_time:44228ms step_avg:44.23ms
+step:1200/20000 train_loss:2.3961 train_time:53050ms step_avg:44.21ms
+step:1400/20000 train_loss:2.4371 train_time:61894ms step_avg:44.21ms
+step:1600/20000 train_loss:2.1052 train_time:70747ms step_avg:44.22ms
+step:1800/20000 train_loss:2.2045 train_time:79580ms step_avg:44.21ms
+step:2000/20000 train_loss:2.2561 train_time:88435ms step_avg:44.22ms
+step:2000/20000 val_loss:2.2412 val_bpb:1.3273 train_time:88468ms step_avg:44.23ms
+step:2200/20000 train_loss:2.0777 train_time:97278ms step_avg:44.22ms
+step:2400/20000 train_loss:2.2031 train_time:106120ms step_avg:44.22ms
+step:2600/20000 train_loss:2.4157 train_time:115023ms step_avg:44.24ms
+step:2800/20000 train_loss:2.2402 train_time:123907ms step_avg:44.25ms
+step:3000/20000 train_loss:2.2329 train_time:132757ms step_avg:44.25ms
+step:3000/20000 val_loss:2.1993 val_bpb:1.3025 train_time:132790ms step_avg:44.26ms
+step:3200/20000 train_loss:2.1942 train_time:141587ms step_avg:44.25ms
+step:3400/20000 train_loss:2.1632 train_time:150427ms step_avg:44.24ms
+step:3600/20000 train_loss:2.1226 train_time:159262ms step_avg:44.24ms
+step:3800/20000 train_loss:2.2278 train_time:168099ms step_avg:44.24ms
+step:4000/20000 train_loss:2.1659 train_time:176940ms step_avg:44.23ms
+step:4000/20000 val_loss:2.1735 val_bpb:1.2873 train_time:176973ms step_avg:44.24ms
+step:4200/20000 train_loss:2.1766 train_time:185878ms step_avg:44.26ms
+step:4400/20000 train_loss:2.1199 train_time:194730ms step_avg:44.26ms
+step:4600/20000 train_loss:1.9740 train_time:203576ms step_avg:44.26ms
+step:4800/20000 train_loss:2.2697 train_time:212418ms step_avg:44.25ms
+step:5000/20000 train_loss:2.0351 train_time:221249ms step_avg:44.25ms
+step:5000/20000 val_loss:2.1563 val_bpb:1.2771 train_time:221283ms step_avg:44.26ms
+step:5200/20000 train_loss:2.1752 train_time:230084ms step_avg:44.25ms
+step:5400/20000 train_loss:2.1891 train_time:238921ms step_avg:44.24ms
+step:5600/20000 train_loss:2.1848 train_time:247765ms step_avg:44.24ms
+step:5800/20000 train_loss:2.1518 train_time:256606ms step_avg:44.24ms
+step:6000/20000 train_loss:2.2262 train_time:265431ms step_avg:44.24ms
+step:6000/20000 val_loss:2.1470 val_bpb:1.2716 train_time:265464ms step_avg:44.24ms
+step:6200/20000 train_loss:2.0926 train_time:274271ms step_avg:44.24ms
+step:6400/20000 train_loss:2.1656 train_time:283103ms step_avg:44.23ms
+step:6600/20000 train_loss:2.1250 train_time:291941ms step_avg:44.23ms
+step:6800/20000 train_loss:2.1931 train_time:300769ms step_avg:44.23ms
+step:7000/20000 train_loss:2.2284 train_time:309603ms step_avg:44.23ms
+step:7000/20000 val_loss:2.1358 val_bpb:1.2650 train_time:309636ms step_avg:44.23ms
+step:7200/20000 train_loss:2.2012 train_time:318449ms step_avg:44.23ms
+step:7400/20000 train_loss:2.1207 train_time:327288ms step_avg:44.23ms
+step:7600/20000 train_loss:2.0047 train_time:336116ms step_avg:44.23ms
+step:7800/20000 train_loss:2.1476 train_time:344943ms step_avg:44.22ms
+step:8000/20000 train_loss:2.1163 train_time:353780ms step_avg:44.22ms
+step:8000/20000 val_loss:2.1255 val_bpb:1.2588 train_time:353813ms step_avg:44.23ms
+step:8200/20000 train_loss:2.1923 train_time:362621ms step_avg:44.22ms
+step:8400/20000 train_loss:2.1394 train_time:371546ms step_avg:44.23ms
+step:8600/20000 train_loss:2.1417 train_time:380385ms step_avg:44.23ms
+step:8800/20000 train_loss:2.1062 train_time:389211ms step_avg:44.23ms
+step:9000/20000 train_loss:2.0279 train_time:398066ms step_avg:44.23ms
+step:9000/20000 val_loss:2.1213 val_bpb:1.2564 train_time:398100ms step_avg:44.23ms
+step:9200/20000 train_loss:2.0878 train_time:406894ms step_avg:44.23ms
+step:9400/20000 train_loss:2.1346 train_time:415728ms step_avg:44.23ms
+step:9600/20000 train_loss:2.1485 train_time:424555ms step_avg:44.22ms
+step:9800/20000 train_loss:2.0753 train_time:433385ms step_avg:44.22ms
+step:10000/20000 train_loss:2.1184 train_time:442219ms step_avg:44.22ms
+step:10000/20000 val_loss:2.1150 val_bpb:1.2526 train_time:442252ms step_avg:44.23ms
+step:10200/20000 train_loss:2.0681 train_time:451053ms step_avg:44.22ms
+step:10400/20000 train_loss:2.1007 train_time:459877ms step_avg:44.22ms
+step:10600/20000 train_loss:1.9794 train_time:468711ms step_avg:44.22ms
+step:10800/20000 train_loss:2.1890 train_time:477545ms step_avg:44.22ms
+step:11000/20000 train_loss:2.1160 train_time:486379ms step_avg:44.22ms
+step:11000/20000 val_loss:2.1080 val_bpb:1.2485 train_time:486412ms step_avg:44.22ms
+step:11200/20000 train_loss:2.0722 train_time:495204ms step_avg:44.21ms
+step:11400/20000 train_loss:2.0602 train_time:504042ms step_avg:44.21ms
+step:11600/20000 train_loss:2.0654 train_time:512875ms step_avg:44.21ms
+step:11800/20000 train_loss:2.1005 train_time:521710ms step_avg:44.21ms
+step:12000/20000 train_loss:2.0716 train_time:530544ms step_avg:44.21ms
+step:12000/20000 val_loss:2.1033 val_bpb:1.2457 train_time:530577ms step_avg:44.21ms
+step:12200/20000 train_loss:2.2243 train_time:539387ms step_avg:44.21ms
+step:12400/20000 train_loss:1.8639 train_time:548303ms step_avg:44.22ms
+step:12600/20000 train_loss:2.0898 train_time:557125ms step_avg:44.22ms
+step:12800/20000 train_loss:2.1041 train_time:565965ms step_avg:44.22ms
+step:13000/20000 train_loss:2.1764 train_time:574807ms step_avg:44.22ms
+step:13000/20000 val_loss:2.0818 val_bpb:1.2329 train_time:574841ms step_avg:44.22ms
+step:13200/20000 train_loss:2.1813 train_time:583644ms step_avg:44.22ms
+step:13400/20000 train_loss:2.0511 train_time:592484ms step_avg:44.22ms
+step:13569/20000 val_loss:2.0612 val_bpb:1.2207 train_time:599983ms step_avg:44.22ms
+stopping_early: wallclock_cap train_time:599983ms step:13569/20000
+peak memory allocated: 10379 MiB reserved: 10490 MiB
+Serialized model: 67488595 bytes
+Code size: 53316 bytes
+Total submission size: 67541911 bytes
+Serialized model int8+zlib: 15970557 bytes (payload:17441058 raw_torch:17487123 payload_ratio:3.87x)
+Total submission size int8+zlib: 16023873 bytes
+final_int8_zlib_roundtrip val_loss:2.0739 val_bpb:1.2283 eval_time:1414ms
+final_int8_zlib_roundtrip_exact val_loss:2.07391391 val_bpb:1.22828864
