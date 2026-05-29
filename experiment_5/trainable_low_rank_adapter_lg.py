@@ -84,7 +84,7 @@ class Hyperparameters:
     # Trainable low-rank bigram adapter.
     bigram_adapter_rank = int(os.environ.get("BIGRAM_ADAPTER_RANK", 64))
     bigram_adapter_lr = float(os.environ.get("BIGRAM_ADAPTER_LR", matrix_lr))
-    bigram_adapter_init_path = os.environ.get("BIGRAM_ADAPTER_INIT_PATH", "../bigram_prior.npz")
+    bigram_adapter_init_path = os.environ.get("BIGRAM_ADAPTER_INIT_PATH", "./bigram_prior.npz")
     bigram_adapter_init_mode = os.environ.get("BIGRAM_ADAPTER_INIT_MODE", "svd")
     bigram_adapter_init_scale = float(os.environ.get("BIGRAM_ADAPTER_INIT_SCALE", 1.0))
     bigram_adapter_scale_init = float(os.environ.get("BIGRAM_ADAPTER_SCALE_INIT", 0.1))
@@ -849,8 +849,9 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        os.makedirs("logs", exist_ok=True)
-        logfile = f"logs/{args.run_id}.txt"
+        logdir = Path(__file__).resolve().parent / "logs"
+        logdir.mkdir(exist_ok=True)
+        logfile = logdir / f"{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:

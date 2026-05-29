@@ -1106,8 +1106,9 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        os.makedirs("logs", exist_ok=True)
-        logfile = f"logs/{args.run_id}.txt"
+        logdir = Path(__file__).resolve().parent / "logs"
+        logdir.mkdir(exist_ok=True)
+        logfile = logdir / f"{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
@@ -1543,24 +1544,33 @@ def main() -> None:
         )
         if should_log_train:
             if use_transkd:
-                log0(
+                train_log = (
                     f"step:{step}/{args.iterations} "
                     f"train_loss:{train_loss.item():.4f} "
                     f"ce_loss:{ce_loss_avg.item():.4f} "
                     f"kd_loss:{kd_loss_avg.item():.4f} "
-                    f"delta_rel:{delta_rel_loss_avg.item():.4f} "
-                    f"delta_dir:{delta_dir_loss_avg.item():.4f} "
-                    f"rel_s_norm:{rel_s_norm_avg.item():.6f} "
-                    f"rel_t_norm:{rel_t_norm_avg.item():.6f} "
-                    f"rel_ratio:{rel_ratio_avg.item():.4f} "
-                    f"raw_dir_s_norm:{raw_dir_s_norm_avg.item():.6f} "
-                    f"raw_dir_t_norm:{raw_dir_t_norm_avg.item():.6f} "
-                    f"raw_dir_ratio:{raw_dir_ratio_avg.item():.6e} "
-                    f"normed_dir_s_norm:{normed_dir_s_norm_avg.item():.6f} "
-                    f"normed_dir_t_norm:{normed_dir_t_norm_avg.item():.6f} "
-                    f"normed_dir_ratio:{normed_dir_ratio_avg.item():.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms "
-                    f"step_avg:{approx_training_time_ms / step:.2f}ms"
+                )
+                if args.transkd_mode in {"delta_rel", "both"}:
+                    train_log += (
+                        f"delta_rel:{delta_rel_loss_avg.item():.4f} "
+                        f"rel_s_norm:{rel_s_norm_avg.item():.6f} "
+                        f"rel_t_norm:{rel_t_norm_avg.item():.6f} "
+                        f"rel_ratio:{rel_ratio_avg.item():.4f} "
+                    )
+                if args.transkd_mode in {"delta_dir", "both"}:
+                    train_log += (
+                        f"delta_dir:{delta_dir_loss_avg.item():.4f} "
+                        f"raw_dir_s_norm:{raw_dir_s_norm_avg.item():.6f} "
+                        f"raw_dir_t_norm:{raw_dir_t_norm_avg.item():.6f} "
+                        f"raw_dir_ratio:{raw_dir_ratio_avg.item():.6e} "
+                        f"normed_dir_s_norm:{normed_dir_s_norm_avg.item():.6f} "
+                        f"normed_dir_t_norm:{normed_dir_t_norm_avg.item():.6f} "
+                        f"normed_dir_ratio:{normed_dir_ratio_avg.item():.4f} "
+                    )
+                log0(
+                    train_log
+                    + f"train_time:{approx_training_time_ms:.0f}ms "
+                    + f"step_avg:{approx_training_time_ms / step:.2f}ms"
                 )
             else:
                 log0(
@@ -1589,8 +1599,8 @@ def main() -> None:
     # the compressed int8+zlib artifact and validate the round-tripped weights.
 
     if master_process:
-        torch.save(base_model.state_dict(), "final_model.pt")
-        model_bytes = os.path.getsize("final_model.pt")
+        torch.save(base_model.state_dict(), "bigteacher_transformation_kd.pt")
+        model_bytes = os.path.getsize("bigteacher_transformation_kd.pt")
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
@@ -1603,9 +1613,9 @@ def main() -> None:
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
+        with open("bigteacher_transformation_kd.int8.ptz", "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
+        quant_file_bytes = os.path.getsize("bigteacher_transformation_kd.int8.ptz")
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
@@ -1616,7 +1626,7 @@ def main() -> None:
 
     if distributed:
         dist.barrier()
-    with open("final_model.int8.ptz", "rb") as f:
+    with open("bigteacher_transformation_kd.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)

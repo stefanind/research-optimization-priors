@@ -1048,8 +1048,9 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        os.makedirs("logs", exist_ok=True)
-        logfile = f"logs/{args.run_id}.txt"
+        logdir = Path(__file__).resolve().parent / "logs"
+        logdir.mkdir(exist_ok=True)
+        logfile = logdir / f"{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:

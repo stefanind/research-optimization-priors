@@ -82,8 +82,8 @@ class Hyperparameters:
 
     # Classic teacher-student logit KL distillation.
     # Set LOGIT_KD_LAMBDA=0.0 to run the original CE-only baseline.
-    logit_kd_teacher_path = os.environ.get("LOGIT_KD_TEACHER_PATH", os.environ.get("TEACHER_PATH", "./large_teacher.pt"))
-    logit_kd_lambda = float(os.environ.get("LOGIT_KD_LAMBDA", "0.0"))
+    logit_kd_teacher_path = os.environ.get("LOGIT_KD_TEACHER_PATH", "./large_teacher.pt")
+    logit_kd_lambda = float(os.environ.get("LOGIT_KD_LAMBDA", "0.01"))
     logit_kd_temp = float(os.environ.get("LOGIT_KD_TEMP", "2.0"))
 
     # Optional separate teacher architecture for logit KD.
@@ -818,8 +818,9 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        os.makedirs("logs", exist_ok=True)
-        logfile = f"logs/{args.run_id}.txt"
+        logdir = Path(__file__).resolve().parent / "logs"
+        logdir.mkdir(exist_ok=True)
+        logfile = logdir / f"{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
@@ -1207,8 +1208,8 @@ def main() -> None:
     # the compressed int8+zlib artifact and validate the round-tripped weights.
 
     if master_process:
-        torch.save(base_model.state_dict(), "final_model.pt")
-        model_bytes = os.path.getsize("final_model.pt")
+        torch.save(base_model.state_dict(), "bigteacher_logit_kd.pt")
+        model_bytes = os.path.getsize("bigteacher_logit_kd.pt")
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
@@ -1221,9 +1222,9 @@ def main() -> None:
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
+        with open("bigteacher_logit_kd.int8.ptz", "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
+        quant_file_bytes = os.path.getsize("bigteacher_logit_kd.int8.ptz")
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
@@ -1234,7 +1235,7 @@ def main() -> None:
 
     if distributed:
         dist.barrier()
-    with open("final_model.int8.ptz", "rb") as f:
+    with open("bigteacher_logit_kd.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)

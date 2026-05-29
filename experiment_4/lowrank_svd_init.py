@@ -85,7 +85,7 @@ class Hyperparameters:
     # - a dense .npz with `mat` shaped [vocab_size, vocab_size], or
     # - the sparse bigram-prior .npz format:
     #   rows, cols, log_probs, default_log_probs.
-    use_lowrank_bigram_init = bool(int(os.environ.get("USE_LOWRANK_BIGRAM_INIT", "0")))
+    use_lowrank_bigram_init = bool(int(os.environ.get("USE_LOWRANK_BIGRAM_INIT", "1")))
     lowrank_bigram_path = os.environ.get("LOWRANK_BIGRAM_PATH", None)
     lowrank_init_rank = int(os.environ.get("LOWRANK_INIT_RANK", 0))  # 0 => auto
     lowrank_init_matrix = os.environ.get("LOWRANK_INIT_MATRIX", "logp")  # logp|centered_logp
@@ -925,8 +925,9 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        os.makedirs("logs", exist_ok=True)
-        logfile = f"logs/{args.run_id}.txt"
+        logdir = Path(__file__).resolve().parent / "logs"
+        logdir.mkdir(exist_ok=True)
+        logfile = logdir / f"{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:

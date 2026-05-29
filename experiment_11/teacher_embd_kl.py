@@ -86,7 +86,7 @@ class Hyperparameters:
     # -----------------------------
     teacher_path = os.environ.get("TEACHER_PATH", "./small_teacher.pt")
     embed_kd_layer_pairs = os.environ.get("EMBED_KD_LAYER_PAIRS", "8:8")
-    embed_kd_lambda = float(os.environ.get("EMBED_KD_LAMBDA", 0.0))
+    embed_kd_lambda = float(os.environ.get("EMBED_KD_LAMBDA", 0.01))
     embed_kd_temp = float(os.environ.get("EMBED_KD_TEMP", 2.0))
     embed_kd_topk = int(os.environ.get("EMBED_KD_TOPK", 0))  # 0 = use all anchors
 
@@ -954,8 +954,9 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        os.makedirs("logs", exist_ok=True)
-        logfile = f"logs/{args.run_id}.txt"
+        logdir = Path(__file__).resolve().parent / "logs"
+        logdir.mkdir(exist_ok=True)
+        logfile = logdir / f"{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
