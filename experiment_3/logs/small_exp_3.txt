@@ -80,18 +80,12 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
-
-    # -----------------------------
-    # DISTILLATION
-    # -----------------------------
-    teacher_path = os.environ.get("TEACHER_PATH", "./small_teacher.pt")
-
-    # Example: "2:2,5:5,8:8" means student layer 2 matches teacher layer 2, etc.
-    distill_layer_pairs = os.environ.get("DISTILL_LAYER_PAIRS", "8:8")
-
-    # First experiment: set DELTA_MAG_LAMBDA=0.0
-    delta_dir_lambda = float(os.environ.get("DELTA_DIR_LAMBDA", 0.01))
-    delta_mag_lambda = float(os.environ.get("DELTA_MAG_LAMBDA", 0.0))
+    # Unigram bias head initialization. Point UNIGRAM_PROBS_PATH at a torch-saved
+    # tensor of shape [vocab_size]. When enabled, lm_head_bias is initialized to
+    # tau * centered_log(unigram_probs), then trained as a normal scalar param.
+    use_unigram_bias_init = bool(int(os.environ.get("USE_UNIGRAM_BIAS_INIT", "0")))
+    unigram_probs_path = os.environ.get("UNIGRAM_PROBS_PATH", None)
+    unigram_bias_tau = float(os.environ.get("UNIGRAM_BIAS_TAU", 1.0))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -666,6 +660,9 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        use_unigram_bias_init: bool = False,
+        unigram_probs_path: str | None = None,
+        unigram_bias_tau: float = 1.0,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -674,6 +671,21 @@ class GPT(nn.Module):
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
+
+        # Trainable output bias. If enabled, initialize from unigram frequencies.
+        self.use_unigram_bias = use_unigram_bias_init
+        self.unigram_bias_tau = unigram_bias_tau
+        self.lm_head_bias = nn.Parameter(torch.zeros(vocab_size, dtype=torch.float32))
+        if unigram_probs_path is not None:
+            unigram_probs = torch.load(unigram_probs_path, map_location="cpu").float().reshape(-1)
+            if unigram_probs.shape != (vocab_size,):
+                raise ValueError(
+                    f"UNIGRAM_PROBS_PATH shape {tuple(unigram_probs.shape)} != ({vocab_size},)"
+                )
+            self.register_buffer("unigram_probs", unigram_probs, persistent=False)
+        else:
+            self.unigram_probs = None
+
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
@@ -704,6 +716,14 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
+        if self.use_unigram_bias and getattr(self, "unigram_probs", None) is not None:
+            p = self.unigram_probs.float()
+            logp = torch.log(p.clamp_min(1e-12))
+            logp = logp - logp.mean()
+            self.lm_head_bias.data.copy_(self.unigram_bias_tau * logp)
+        else:
+            nn.init.zeros_(self.lm_head_bias)
+
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
@@ -719,180 +739,23 @@ class GPT(nn.Module):
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             x = self.blocks[self.num_encoder_layers + i](x, x0)
 
-        x = self.final_norm(x).reshape(-1, x.size(-1))
+        x = self.final_norm(x)
+        x_flat = x.reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
         if self.tie_embeddings:
-            logits_proj = F.linear(x, self.tok_emb.weight)
+            logits_proj = F.linear(x_flat, self.tok_emb.weight)
         else:
             if self.lm_head is None:
                 raise RuntimeError("lm_head is required when tie_embeddings=False")
-            logits_proj = self.lm_head(x)
-        logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+            logits_proj = self.lm_head(x_flat)
+
+        logits_proj = logits_proj + self.lm_head_bias.to(dtype=logits_proj.dtype)
+
+        logits = logits_proj.view(input_ids.size(0), input_ids.size(1), -1)
+        logits = self.logit_softcap * torch.tanh(logits / self.logit_softcap)
+        logits = logits.reshape(-1, logits.size(-1))
         return F.cross_entropy(logits.float(), targets, reduction="mean")
 
-    def forward_with_deltas(
-        self,
-        input_ids: Tensor,
-        target_ids: Tensor | None = None,
-        capture_layers: set[int] | None = None,
-    ) -> dict[str, Tensor | dict[int, Tensor]]:
-        """
-        Forward pass that returns:
-        - optional CE loss
-        - selected layer deltas
-
-        Delta means:
-            delta_l = h_after_block_l - h_before_block_l
-
-        For decoder layers, the skip connection is applied before defining the block delta.
-        So delta measures the transform done by the transformer block after skip injection.
-        """
-        if capture_layers is None:
-            capture_layers = set()
-
-        deltas: dict[int, Tensor] = {}
-
-        x = self.tok_emb(input_ids)
-        x = F.rms_norm(x, (x.size(-1),))
-        x0 = x
-        skips: list[Tensor] = []
-
-        # Encoder half.
-        for i in range(self.num_encoder_layers):
-            x_before = x
-            x = self.blocks[i](x, x0)
-
-            if i in capture_layers:
-                deltas[i] = x - x_before
-
-            skips.append(x)
-
-        # Decoder half.
-        for j in range(self.num_decoder_layers):
-            layer_idx = self.num_encoder_layers + j
-
-            if skips:
-                x = x + self.skip_weights[j].to(dtype=x.dtype)[None, None, :] * skips.pop()
-
-            x_before = x
-            x = self.blocks[layer_idx](x, x0)
-
-            if layer_idx in capture_layers:
-                deltas[layer_idx] = x - x_before
-
-        out: dict[str, Tensor | dict[int, Tensor]] = {
-            "deltas": deltas,
-        }
-
-        if target_ids is not None:
-            x = self.final_norm(x)
-
-            bsz, seqlen, dim = x.shape
-            x_flat = x.reshape(-1, dim)
-
-            if self.tie_embeddings:
-                logits_proj = F.linear(x_flat, self.tok_emb.weight)
-            else:
-                if self.lm_head is None:
-                    raise RuntimeError("lm_head is required when tie_embeddings=False")
-                logits_proj = self.lm_head(x_flat)
-
-            logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-            logits = logits.reshape(bsz, seqlen, -1)
-            ce_loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
-                target_ids.reshape(-1),
-                reduction="mean",
-            )
-            out["ce_loss"] = ce_loss
-
-        return out
-
-
-
-def delta_distill_losses(
-    student_deltas: dict[int, Tensor],
-    teacher_deltas: dict[int, Tensor],
-    layer_pairs: list[tuple[int, int]],
-    compute_magnitude: bool,
-    eps: float = 1e-6,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """
-    Returns:
-      direction_loss:
-          1 - cosine similarity between student and teacher update directions
-
-      magnitude_loss:
-          log-norm MSE between student and teacher update sizes
-
-      student_norm_mean:
-          mean norm of student deltas
-
-      teacher_norm_mean:
-          mean norm of teacher deltas
-    """
-    if not layer_pairs:
-        device = next(iter(student_deltas.values())).device
-        zero = torch.zeros((), device=device)
-        return zero, zero, zero, zero
-
-    dir_losses: list[Tensor] = []
-    mag_losses: list[Tensor] = []
-    student_norms: list[Tensor] = []
-    teacher_norms: list[Tensor] = []
-
-    for student_layer, teacher_layer in layer_pairs:
-        delta_s = student_deltas[student_layer].float()
-        delta_t = teacher_deltas[teacher_layer].float()
-
-        dir_loss = 1.0 - F.cosine_similarity(
-            delta_s,
-            delta_t,
-            dim=-1,
-            eps=eps,
-        ).mean()
-
-        dir_losses.append(dir_loss)
-
-        norm_s = delta_s.norm(dim=-1).clamp_min(eps)
-        norm_t = delta_t.norm(dim=-1).clamp_min(eps)
-
-        student_norms.append(norm_s.mean())
-        teacher_norms.append(norm_t.mean())
-
-        if compute_magnitude:
-            mag_loss = F.mse_loss(torch.log(norm_s), torch.log(norm_t))
-            mag_losses.append(mag_loss)
-
-    direction_loss = torch.stack(dir_losses).mean()
-
-    if compute_magnitude:
-        magnitude_loss = torch.stack(mag_losses).mean()
-    else:
-        magnitude_loss = torch.zeros((), device=direction_loss.device)
-
-    student_norm_mean = torch.stack(student_norms).mean()
-    teacher_norm_mean = torch.stack(teacher_norms).mean()
-
-    return direction_loss, magnitude_loss, student_norm_mean, teacher_norm_mean
-
-
-def parse_layer_pairs(spec: str) -> list[tuple[int, int]]:
-    """
-    Parses "2:2,5:5,8:8" into [(2, 2), (5, 5), (8, 8)].
-
-    Format:
-        student_layer:teacher_layer
-    """
-    pairs: list[tuple[int, int]] = []
-    if not spec.strip():
-        return pairs
-
-    for item in spec.split(","):
-        left, right = item.split(":")
-        pairs.append((int(left), int(right)))
-
-    return pairs
 
 # -----------------------------
 # TRAINING
@@ -1006,6 +869,9 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
+        use_unigram_bias_init=args.use_unigram_bias_init,
+        unigram_probs_path=args.unigram_probs_path,
+        unigram_bias_tau=args.unigram_bias_tau,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1013,52 +879,6 @@ def main() -> None:
     restore_low_dim_params_to_fp32(base_model)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
-
-    teacher_model: GPT | None = None
-
-    layer_pairs = parse_layer_pairs(args.distill_layer_pairs)
-    student_capture_layers = {s for s, _ in layer_pairs}
-    teacher_capture_layers = {t for _, t in layer_pairs}
-
-    if args.teacher_path:
-        teacher_model = GPT(
-            vocab_size=args.vocab_size,
-            num_layers=args.num_layers,
-            model_dim=args.model_dim,
-            num_heads=args.num_heads,
-            num_kv_heads=args.num_kv_heads,
-            mlp_mult=args.mlp_mult,
-            tie_embeddings=args.tie_embeddings,
-            tied_embed_init_std=args.tied_embed_init_std,
-            logit_softcap=args.logit_softcap,
-            rope_base=args.rope_base,
-            qk_gain_init=args.qk_gain_init,
-        ).to(device).bfloat16()
-
-        for module in teacher_model.modules():
-            if isinstance(module, CastedLinear):
-                module.float()
-
-        restore_low_dim_params_to_fp32(teacher_model)
-
-        if args.teacher_path.endswith(".ptz"):
-            with open(args.teacher_path, "rb") as f:
-                quant_blob = f.read()
-            quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob)), map_location="cpu")
-            teacher_state = dequantize_state_dict_int8(quant_state)
-        else:
-            teacher_state = torch.load(args.teacher_path, map_location="cpu")
-
-        teacher_model.load_state_dict(teacher_state, strict=True)
-        teacher_model.eval()
-
-        for p in teacher_model.parameters():
-            p.requires_grad_(False)
-
-        log0(f"teacher_loaded:{args.teacher_path}")
-        log0(f"distill_layer_pairs:{layer_pairs}")
-
-
 
     # Optimizer split:
     # - token embedding (Adam) uses EMBED_LR
@@ -1078,6 +898,7 @@ def main() -> None:
     ]
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
+    scalar_params.append(base_model.lm_head_bias)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
@@ -1125,6 +946,10 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
+    log0(
+        f"unigram_bias:{'enabled' if args.use_unigram_bias_init else 'disabled'} "
+        f"unigram_probs_path:{args.unigram_probs_path} unigram_bias_tau:{args.unigram_bias_tau}"
+    )
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1224,84 +1049,16 @@ def main() -> None:
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
-
         train_loss = torch.zeros((), device=device)
-        dir_loss_meter = torch.zeros((), device=device)
-        mag_loss_meter = torch.zeros((), device=device)
-        student_norm_meter = torch.zeros((), device=device)
-        teacher_norm_meter = torch.zeros((), device=device)
-
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-
-            x, y = train_loader.next_batch(
-                args.train_batch_tokens,
-                args.train_seq_len,
-                grad_accum_steps,
-            )
-
+            x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                if teacher_model is None:
-                    loss = model(x, y)
-                    ce_loss = loss
-
-                    dir_loss = torch.zeros((), device=device)
-                    mag_loss = torch.zeros((), device=device)
-                    student_norm = torch.zeros((), device=device)
-                    teacher_norm = torch.zeros((), device=device)
-
-                else:
-                    # Teacher forward: frozen, no gradients.
-                    with torch.no_grad():
-                        teacher_out = teacher_model.forward_with_deltas(
-                            x,
-                            target_ids=None,
-                            capture_layers=teacher_capture_layers,
-                        )
-
-                    # Student forward: gradients enabled.
-                    # This bypasses DDP, so use single-GPU for this experiment.
-                    student_out = base_model.forward_with_deltas(
-                        x,
-                        target_ids=y,
-                        capture_layers=student_capture_layers,
-                    )
-
-                    ce_loss = student_out["ce_loss"]
-                    student_deltas = student_out["deltas"]
-                    teacher_deltas = teacher_out["deltas"]
-
-                    assert isinstance(ce_loss, Tensor)
-                    assert isinstance(student_deltas, dict)
-                    assert isinstance(teacher_deltas, dict)
-
-                    dir_loss, mag_loss, student_norm, teacher_norm = delta_distill_losses(
-                        student_deltas,
-                        teacher_deltas,
-                        layer_pairs,
-                        compute_magnitude=args.delta_mag_lambda > 0.0,
-                    )
-
-                    loss = (
-                        ce_loss
-                        + args.delta_dir_lambda * dir_loss
-                        + args.delta_mag_lambda * mag_loss
-                    )
-
-            train_loss += ce_loss.detach()
-            dir_loss_meter += dir_loss.detach()
-            mag_loss_meter += mag_loss.detach()
-            student_norm_meter += student_norm.detach()
-            teacher_norm_meter += teacher_norm.detach()
-
+                loss = model(x, y)
+            train_loss += loss.detach()
             (loss * grad_scale).backward()
-
         train_loss /= grad_accum_steps
-        dir_loss_meter /= grad_accum_steps
-        mag_loss_meter /= grad_accum_steps
-        student_norm_meter /= grad_accum_steps
-        teacher_norm_meter /= grad_accum_steps
 
         frac = min(step / args.muon_momentum_warmup_steps, 1.0) if args.muon_momentum_warmup_steps > 0 else 1.0
         muon_momentum = (1 - frac) * args.muon_momentum_warmup_start + frac * args.muon_momentum
@@ -1325,24 +1082,10 @@ def main() -> None:
             and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None)
         )
         if should_log_train:
-            if teacher_model is None:
-                log0(
-                    f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
-                )
-            else:
-                log0(
-                    f"step:{step}/{args.iterations} "
-                    f"ce_loss:{train_loss.item():.4f} "
-                    f"delta_dir:{dir_loss_meter.item():.4f} "
-                    f"delta_mag:{mag_loss_meter.item():.4f} "
-                    f"avg_cos:{1.0 - dir_loss_meter.item():.4f} "
-                    f"student_norm:{student_norm_meter.item():.4f} "
-                    f"teacher_norm:{teacher_norm_meter.item():.4f} "
-                    f"norm_ratio:{student_norm_meter.item() / max(teacher_norm_meter.item(), 1e-8):.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms "
-                    f"step_avg:{approx_training_time_ms / step:.2f}ms"
-                )
+            log0(
+                f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
+                f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
+            )
 
         # Needed to sync whether we've reached the wallclock cap.
         reached_cap = max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
@@ -1365,8 +1108,8 @@ def main() -> None:
     # the compressed int8+zlib artifact and validate the round-tripped weights.
 
     if master_process:
-        torch.save(base_model.state_dict(), "teacher_directional.pt")
-        model_bytes = os.path.getsize("teacher_directional.pt")
+        torch.save(base_model.state_dict(), "unigram_bias.pt")
+        model_bytes = os.path.getsize("unigram_bias.pt")
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
@@ -1379,9 +1122,9 @@ def main() -> None:
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("teacher_directional.int8.ptz", "wb") as f:
+        with open("unigram_bias.int8.ptz", "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("teacher_directional.int8.ptz")
+        quant_file_bytes = os.path.getsize("unigram_bias.int8.ptz")
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
@@ -1392,7 +1135,7 @@ def main() -> None:
 
     if distributed:
         dist.barrier()
-    with open("teacher_directional.int8.ptz", "rb") as f:
+    with open("unigram_bias.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
@@ -1423,3 +1166,287 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+====================================================================================================
+Running Python 3.12.3 (main, Nov  6 2025, 13:44:16) [GCC 13.3.0]
+Running PyTorch 2.9.1+cu128
+Mon Jun  1 23:31:39 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.133.20             Driver Version: 570.133.20     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:52:00.0 Off |                    0 |
+| N/A   45C    P0             98W /  700W |    1183MiB /  81559MiB |      8%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           14134      C   /usr/local/bin/python                  1174MiB |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:80
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+model_params:17060936
+world_size:1 grad_accum_steps:8
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+train_batch_tokens:524288 train_seq_len:1024 iterations:1000 warmup_steps:20 max_wallclock_seconds:600.000
+seed:1337
+unigram_bias:enabled unigram_probs_path:./unigram_probs.pt unigram_bias_tau:1.0
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/1000 val_loss:6.0330 val_bpb:3.5731 train_time:0ms step_avg:0.01ms
+step:1/1000 train_loss:6.0153 train_time:337ms step_avg:337.10ms
+step:2/1000 train_loss:17.6071 train_time:677ms step_avg:338.34ms
+step:3/1000 train_loss:11.6677 train_time:1019ms step_avg:339.80ms
+step:4/1000 train_loss:8.4285 train_time:1361ms step_avg:340.29ms
+step:5/1000 train_loss:7.1029 train_time:1703ms step_avg:340.56ms
+step:6/1000 train_loss:7.0168 train_time:2045ms step_avg:340.89ms
+step:7/1000 train_loss:6.6548 train_time:2388ms step_avg:341.21ms
+step:8/1000 train_loss:6.4016 train_time:2730ms step_avg:341.21ms
+step:9/1000 train_loss:6.2695 train_time:3069ms step_avg:341.03ms
+step:10/1000 train_loss:6.1223 train_time:3412ms step_avg:341.15ms
+step:15/1000 train_loss:5.5576 train_time:5094ms step_avg:339.60ms
+step:20/1000 train_loss:4.9106 train_time:6777ms step_avg:338.85ms
+step:25/1000 train_loss:4.6450 train_time:8465ms step_avg:338.59ms
+step:30/1000 train_loss:4.4144 train_time:10155ms step_avg:338.49ms
+step:35/1000 train_loss:4.2524 train_time:11836ms step_avg:338.18ms
+step:40/1000 train_loss:4.1361 train_time:13517ms step_avg:337.93ms
+step:45/1000 train_loss:4.0279 train_time:15199ms step_avg:337.76ms
+step:50/1000 train_loss:3.8899 train_time:16885ms step_avg:337.69ms
+step:55/1000 train_loss:3.7763 train_time:18567ms step_avg:337.57ms
+step:60/1000 train_loss:3.7342 train_time:20248ms step_avg:337.46ms
+step:65/1000 train_loss:3.5839 train_time:21930ms step_avg:337.38ms
+step:70/1000 train_loss:3.5661 train_time:23613ms step_avg:337.33ms
+step:75/1000 train_loss:3.5181 train_time:25295ms step_avg:337.27ms
+step:80/1000 train_loss:3.4485 train_time:26980ms step_avg:337.25ms
+step:85/1000 train_loss:3.3748 train_time:28659ms step_avg:337.16ms
+step:90/1000 train_loss:3.3473 train_time:30337ms step_avg:337.08ms
+step:95/1000 train_loss:3.3974 train_time:32018ms step_avg:337.03ms
+step:100/1000 train_loss:3.2580 train_time:33696ms step_avg:336.96ms
+step:100/1000 val_loss:3.2648 val_bpb:1.9336 train_time:33704ms step_avg:337.04ms
+step:105/1000 train_loss:3.2495 train_time:35386ms step_avg:337.01ms
+step:110/1000 train_loss:3.1647 train_time:37073ms step_avg:337.02ms
+step:115/1000 train_loss:3.1225 train_time:38754ms step_avg:336.99ms
+step:120/1000 train_loss:3.1483 train_time:40434ms step_avg:336.95ms
+step:125/1000 train_loss:3.0716 train_time:42112ms step_avg:336.90ms
+step:130/1000 train_loss:3.0733 train_time:43793ms step_avg:336.87ms
+step:135/1000 train_loss:3.0088 train_time:45472ms step_avg:336.83ms
+step:140/1000 train_loss:2.9411 train_time:47150ms step_avg:336.78ms
+step:145/1000 train_loss:2.9415 train_time:48828ms step_avg:336.75ms
+step:150/1000 train_loss:2.9849 train_time:50508ms step_avg:336.72ms
+step:155/1000 train_loss:2.9112 train_time:52188ms step_avg:336.70ms
+step:160/1000 train_loss:2.8792 train_time:53865ms step_avg:336.66ms
+step:165/1000 train_loss:2.9235 train_time:55543ms step_avg:336.62ms
+step:170/1000 train_loss:2.9278 train_time:57219ms step_avg:336.58ms
+step:175/1000 train_loss:2.8042 train_time:58897ms step_avg:336.56ms
+step:180/1000 train_loss:2.8278 train_time:60574ms step_avg:336.52ms
+step:185/1000 train_loss:2.8667 train_time:62251ms step_avg:336.49ms
+step:190/1000 train_loss:2.8299 train_time:63933ms step_avg:336.49ms
+step:195/1000 train_loss:2.8086 train_time:65677ms step_avg:336.81ms
+step:200/1000 train_loss:2.7528 train_time:67366ms step_avg:336.83ms
+step:200/1000 val_loss:2.7999 val_bpb:1.6582 train_time:67372ms step_avg:336.86ms
+step:205/1000 train_loss:2.7268 train_time:69060ms step_avg:336.88ms
+step:210/1000 train_loss:2.7635 train_time:70735ms step_avg:336.83ms
+step:215/1000 train_loss:2.7753 train_time:72410ms step_avg:336.79ms
+step:220/1000 train_loss:2.8403 train_time:74082ms step_avg:336.74ms
+step:225/1000 train_loss:2.7535 train_time:75756ms step_avg:336.69ms
+step:230/1000 train_loss:2.7743 train_time:77428ms step_avg:336.64ms
+step:235/1000 train_loss:2.7535 train_time:79102ms step_avg:336.61ms
+step:240/1000 train_loss:2.7449 train_time:80778ms step_avg:336.57ms
+step:245/1000 train_loss:2.6906 train_time:82452ms step_avg:336.54ms
+step:250/1000 train_loss:2.7149 train_time:84129ms step_avg:336.52ms
+step:255/1000 train_loss:2.6933 train_time:85806ms step_avg:336.49ms
+step:260/1000 train_loss:2.6534 train_time:87485ms step_avg:336.48ms
+step:265/1000 train_loss:2.6739 train_time:89180ms step_avg:336.53ms
+step:270/1000 train_loss:2.6225 train_time:90879ms step_avg:336.59ms
+step:275/1000 train_loss:2.6292 train_time:92575ms step_avg:336.64ms
+step:280/1000 train_loss:2.6438 train_time:94273ms step_avg:336.69ms
+step:285/1000 train_loss:2.6777 train_time:95962ms step_avg:336.71ms
+step:290/1000 train_loss:2.6562 train_time:97652ms step_avg:336.73ms
+step:295/1000 train_loss:2.6242 train_time:99339ms step_avg:336.74ms
+step:300/1000 train_loss:2.5987 train_time:101031ms step_avg:336.77ms
+step:300/1000 val_loss:2.6314 val_bpb:1.5585 train_time:101037ms step_avg:336.79ms
+step:305/1000 train_loss:2.6349 train_time:102738ms step_avg:336.85ms
+step:310/1000 train_loss:2.6116 train_time:104440ms step_avg:336.90ms
+step:315/1000 train_loss:2.5969 train_time:106149ms step_avg:336.98ms
+step:320/1000 train_loss:2.5967 train_time:107857ms step_avg:337.05ms
+step:325/1000 train_loss:2.6100 train_time:109560ms step_avg:337.11ms
+step:330/1000 train_loss:2.6221 train_time:111262ms step_avg:337.16ms
+step:335/1000 train_loss:2.6275 train_time:112960ms step_avg:337.19ms
+step:340/1000 train_loss:2.5804 train_time:114654ms step_avg:337.22ms
+step:345/1000 train_loss:2.5715 train_time:116345ms step_avg:337.23ms
+step:350/1000 train_loss:2.5983 train_time:118029ms step_avg:337.23ms
+step:355/1000 train_loss:2.6120 train_time:119715ms step_avg:337.23ms
+step:360/1000 train_loss:2.5942 train_time:121403ms step_avg:337.23ms
+step:365/1000 train_loss:2.4867 train_time:123085ms step_avg:337.22ms
+step:370/1000 train_loss:2.4684 train_time:124765ms step_avg:337.20ms
+step:375/1000 train_loss:2.6070 train_time:126448ms step_avg:337.20ms
+step:380/1000 train_loss:2.5476 train_time:128134ms step_avg:337.19ms
+step:385/1000 train_loss:2.6016 train_time:132156ms step_avg:343.26ms
+step:390/1000 train_loss:2.5988 train_time:133849ms step_avg:343.20ms
+step:395/1000 train_loss:2.5358 train_time:135540ms step_avg:343.14ms
+step:400/1000 train_loss:2.3821 train_time:137231ms step_avg:343.08ms
+step:400/1000 val_loss:2.5506 val_bpb:1.5106 train_time:137237ms step_avg:343.09ms
+step:405/1000 train_loss:2.5509 train_time:138923ms step_avg:343.02ms
+step:410/1000 train_loss:2.5457 train_time:140624ms step_avg:342.99ms
+step:415/1000 train_loss:2.6014 train_time:142319ms step_avg:342.94ms
+step:420/1000 train_loss:2.4659 train_time:144011ms step_avg:342.88ms
+step:425/1000 train_loss:2.5115 train_time:145713ms step_avg:342.85ms
+step:430/1000 train_loss:2.4705 train_time:147403ms step_avg:342.80ms
+step:435/1000 train_loss:2.4955 train_time:149093ms step_avg:342.74ms
+step:440/1000 train_loss:2.5520 train_time:150796ms step_avg:342.72ms
+step:445/1000 train_loss:2.5331 train_time:152483ms step_avg:342.66ms
+step:450/1000 train_loss:2.4971 train_time:154172ms step_avg:342.60ms
+step:455/1000 train_loss:2.4279 train_time:155861ms step_avg:342.55ms
+step:460/1000 train_loss:2.5104 train_time:157550ms step_avg:342.50ms
+step:465/1000 train_loss:2.4357 train_time:159247ms step_avg:342.47ms
+step:470/1000 train_loss:2.5213 train_time:160941ms step_avg:342.43ms
+step:475/1000 train_loss:2.5184 train_time:162628ms step_avg:342.37ms
+step:480/1000 train_loss:2.4785 train_time:164325ms step_avg:342.34ms
+step:485/1000 train_loss:2.3812 train_time:166039ms step_avg:342.35ms
+step:490/1000 train_loss:2.5495 train_time:167729ms step_avg:342.30ms
+step:495/1000 train_loss:2.5208 train_time:169419ms step_avg:342.26ms
+step:500/1000 train_loss:2.4857 train_time:171107ms step_avg:342.21ms
+step:500/1000 val_loss:2.4812 val_bpb:1.4695 train_time:171112ms step_avg:342.22ms
+step:505/1000 train_loss:2.5390 train_time:172795ms step_avg:342.17ms
+step:510/1000 train_loss:2.3989 train_time:174476ms step_avg:342.11ms
+step:515/1000 train_loss:2.4609 train_time:176156ms step_avg:342.05ms
+step:520/1000 train_loss:2.4896 train_time:177850ms step_avg:342.02ms
+step:525/1000 train_loss:2.5486 train_time:179541ms step_avg:341.98ms
+step:530/1000 train_loss:2.5042 train_time:181237ms step_avg:341.96ms
+step:535/1000 train_loss:2.4782 train_time:182936ms step_avg:341.94ms
+step:540/1000 train_loss:2.2928 train_time:184635ms step_avg:341.92ms
+step:545/1000 train_loss:2.5262 train_time:186325ms step_avg:341.88ms
+step:550/1000 train_loss:2.3711 train_time:188010ms step_avg:341.84ms
+step:555/1000 train_loss:2.5232 train_time:189708ms step_avg:341.82ms
+step:560/1000 train_loss:2.4714 train_time:191412ms step_avg:341.81ms
+step:565/1000 train_loss:2.4414 train_time:193094ms step_avg:341.76ms
+step:570/1000 train_loss:2.4879 train_time:194783ms step_avg:341.72ms
+step:575/1000 train_loss:2.4232 train_time:200018ms step_avg:347.86ms
+step:580/1000 train_loss:2.4943 train_time:201701ms step_avg:347.76ms
+step:585/1000 train_loss:2.4094 train_time:203391ms step_avg:347.68ms
+step:590/1000 train_loss:2.4663 train_time:205072ms step_avg:347.58ms
+step:595/1000 train_loss:2.3151 train_time:206751ms step_avg:347.48ms
+step:600/1000 train_loss:2.4843 train_time:208435ms step_avg:347.39ms
+step:600/1000 val_loss:2.4327 val_bpb:1.4408 train_time:208441ms step_avg:347.40ms
+step:605/1000 train_loss:2.4738 train_time:210112ms step_avg:347.29ms
+step:610/1000 train_loss:2.4797 train_time:211787ms step_avg:347.19ms
+step:615/1000 train_loss:2.4321 train_time:213464ms step_avg:347.10ms
+step:620/1000 train_loss:2.4458 train_time:215141ms step_avg:347.00ms
+step:625/1000 train_loss:2.4927 train_time:216818ms step_avg:346.91ms
+step:630/1000 train_loss:2.4684 train_time:218493ms step_avg:346.81ms
+step:635/1000 train_loss:2.4402 train_time:220174ms step_avg:346.73ms
+step:640/1000 train_loss:2.3639 train_time:221848ms step_avg:346.64ms
+step:645/1000 train_loss:2.3902 train_time:223535ms step_avg:346.57ms
+step:650/1000 train_loss:2.2959 train_time:225230ms step_avg:346.51ms
+step:655/1000 train_loss:2.3955 train_time:226921ms step_avg:346.44ms
+step:660/1000 train_loss:2.4777 train_time:228614ms step_avg:346.39ms
+step:665/1000 train_loss:2.4126 train_time:230308ms step_avg:346.33ms
+step:670/1000 train_loss:2.4229 train_time:232001ms step_avg:346.27ms
+step:675/1000 train_loss:2.2877 train_time:233692ms step_avg:346.21ms
+step:680/1000 train_loss:2.4467 train_time:235386ms step_avg:346.16ms
+step:685/1000 train_loss:2.2911 train_time:237079ms step_avg:346.10ms
+step:690/1000 train_loss:2.4127 train_time:238773ms step_avg:346.05ms
+step:695/1000 train_loss:2.4206 train_time:240459ms step_avg:345.98ms
+step:700/1000 train_loss:2.4348 train_time:242148ms step_avg:345.93ms
+step:700/1000 val_loss:2.3890 val_bpb:1.4149 train_time:242153ms step_avg:345.93ms
+step:705/1000 train_loss:2.3894 train_time:243843ms step_avg:345.88ms
+step:710/1000 train_loss:2.3580 train_time:245539ms step_avg:345.83ms
+step:715/1000 train_loss:2.3736 train_time:247231ms step_avg:345.78ms
+step:720/1000 train_loss:2.3147 train_time:248924ms step_avg:345.73ms
+step:725/1000 train_loss:2.4358 train_time:250618ms step_avg:345.68ms
+step:730/1000 train_loss:2.4149 train_time:252313ms step_avg:345.63ms
+step:735/1000 train_loss:2.2947 train_time:254020ms step_avg:345.61ms
+step:740/1000 train_loss:2.3748 train_time:255717ms step_avg:345.56ms
+step:745/1000 train_loss:2.4316 train_time:257410ms step_avg:345.52ms
+step:750/1000 train_loss:2.3328 train_time:259108ms step_avg:345.48ms
+step:755/1000 train_loss:2.3531 train_time:260804ms step_avg:345.44ms
+step:760/1000 train_loss:2.3081 train_time:262489ms step_avg:345.38ms
+step:765/1000 train_loss:2.3208 train_time:269421ms step_avg:352.18ms
+step:770/1000 train_loss:2.3655 train_time:271096ms step_avg:352.07ms
+step:775/1000 train_loss:2.4149 train_time:272774ms step_avg:351.97ms
+step:780/1000 train_loss:2.3506 train_time:274450ms step_avg:351.86ms
+step:785/1000 train_loss:2.3649 train_time:276126ms step_avg:351.75ms
+step:790/1000 train_loss:2.3720 train_time:277801ms step_avg:351.65ms
+step:795/1000 train_loss:2.3403 train_time:279478ms step_avg:351.55ms
+step:800/1000 train_loss:2.3225 train_time:281154ms step_avg:351.44ms
+step:800/1000 val_loss:2.3570 val_bpb:1.3959 train_time:281161ms step_avg:351.45ms
+step:805/1000 train_loss:2.3398 train_time:282835ms step_avg:351.35ms
+step:810/1000 train_loss:2.3761 train_time:284510ms step_avg:351.25ms
+step:815/1000 train_loss:2.3290 train_time:286203ms step_avg:351.17ms
+step:820/1000 train_loss:2.3252 train_time:287883ms step_avg:351.08ms
+step:825/1000 train_loss:2.4200 train_time:289560ms step_avg:350.98ms
+step:830/1000 train_loss:2.3689 train_time:291240ms step_avg:350.89ms
+step:835/1000 train_loss:2.3595 train_time:292917ms step_avg:350.80ms
+step:840/1000 train_loss:2.3400 train_time:294595ms step_avg:350.71ms
+step:845/1000 train_loss:2.3713 train_time:296271ms step_avg:350.62ms
+step:850/1000 train_loss:2.4265 train_time:297949ms step_avg:350.53ms
+step:855/1000 train_loss:2.3703 train_time:299624ms step_avg:350.44ms
+step:860/1000 train_loss:2.3252 train_time:301298ms step_avg:350.35ms
+step:865/1000 train_loss:2.3586 train_time:302973ms step_avg:350.26ms
+step:870/1000 train_loss:2.3756 train_time:304648ms step_avg:350.17ms
+step:875/1000 train_loss:2.3305 train_time:306321ms step_avg:350.08ms
+step:880/1000 train_loss:2.3216 train_time:307996ms step_avg:349.99ms
+step:885/1000 train_loss:2.2912 train_time:309672ms step_avg:349.91ms
+step:890/1000 train_loss:2.3086 train_time:311347ms step_avg:349.83ms
+step:895/1000 train_loss:2.2796 train_time:313030ms step_avg:349.75ms
+step:900/1000 train_loss:2.3466 train_time:314719ms step_avg:349.69ms
+step:900/1000 val_loss:2.3281 val_bpb:1.3788 train_time:314724ms step_avg:349.69ms
+step:905/1000 train_loss:2.2763 train_time:316395ms step_avg:349.61ms
+step:910/1000 train_loss:2.4068 train_time:318071ms step_avg:349.53ms
+step:915/1000 train_loss:2.3470 train_time:319750ms step_avg:349.45ms
+step:920/1000 train_loss:2.2926 train_time:321428ms step_avg:349.38ms
+step:925/1000 train_loss:2.2615 train_time:323106ms step_avg:349.30ms
+step:930/1000 train_loss:2.3051 train_time:324784ms step_avg:349.23ms
+step:935/1000 train_loss:2.2690 train_time:326461ms step_avg:349.16ms
+step:940/1000 train_loss:2.3323 train_time:328161ms step_avg:349.11ms
+step:945/1000 train_loss:2.3856 train_time:329849ms step_avg:349.05ms
+step:950/1000 train_loss:2.3554 train_time:331529ms step_avg:348.98ms
+step:955/1000 train_loss:2.3064 train_time:333746ms step_avg:349.47ms
+step:960/1000 train_loss:2.3018 train_time:335423ms step_avg:349.40ms
+step:965/1000 train_loss:2.2831 train_time:337099ms step_avg:349.33ms
+step:970/1000 train_loss:2.3368 train_time:338779ms step_avg:349.26ms
+step:975/1000 train_loss:2.2777 train_time:340456ms step_avg:349.19ms
+step:980/1000 train_loss:2.2951 train_time:342132ms step_avg:349.11ms
+step:985/1000 train_loss:2.3486 train_time:343808ms step_avg:349.04ms
+step:990/1000 train_loss:2.3195 train_time:345486ms step_avg:348.98ms
+step:995/1000 train_loss:2.2900 train_time:347166ms step_avg:348.91ms
+step:1000/1000 train_loss:2.3365 train_time:348842ms step_avg:348.84ms
+step:1000/1000 val_loss:2.3051 val_bpb:1.3652 train_time:348847ms step_avg:348.85ms
+peak memory allocated: 10239 MiB reserved: 10554 MiB
+Serialized model: 67229499 bytes
+Code size: 49638 bytes
+Total submission size: 67279137 bytes
+Serialized model int8+zlib: 14275073 bytes (payload:17180960 raw_torch:17226391 payload_ratio:3.91x)
+Total submission size int8+zlib: 14324711 bytes
+final_int8_zlib_roundtrip val_loss:2.3065 val_bpb:1.3660 eval_time:11152ms
+final_int8_zlib_roundtrip_exact val_loss:2.30649306 val_bpb:1.36603511

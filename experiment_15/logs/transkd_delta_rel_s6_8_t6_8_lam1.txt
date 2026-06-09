@@ -80,18 +80,42 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
-
     # -----------------------------
-    # DISTILLATION
+    # Transformation KD / teacher transformation distillation
     # -----------------------------
-    teacher_path = os.environ.get("TEACHER_PATH", "./small_teacher.pt")
+    # Modes:
+    #   off       = CE-only baseline
+    #   delta_rel = match change in token-token geometry: ΔR = R_after - R_before
+    #   delta_dir = match geometry of residual update directions: Δh = h_after - h_before
+    #   both      = use both delta_rel and delta_dir
+    transkd_mode = os.environ.get("TRANSKD_MODE", "off").lower()
+    transkd_teacher_path = os.environ.get("TRANSKD_TEACHER_PATH", "./final_model.pt")
 
-    # Example: "2:2,5:5,8:8" means student layer 2 matches teacher layer 2, etc.
-    distill_layer_pairs = os.environ.get("DISTILL_LAYER_PAIRS", "8:8")
+    transkd_lambda = float(os.environ.get("TRANSKD_LAMBDA", "1e-3"))
+    transkd_delta_rel_lambda = float(os.environ.get("TRANSKD_DELTA_REL_LAMBDA", "1.0"))
+    transkd_delta_dir_lambda = float(os.environ.get("TRANSKD_DELTA_DIR_LAMBDA", "1.0"))
 
-    # First experiment: set DELTA_MAG_LAMBDA=0.0
-    delta_dir_lambda = float(os.environ.get("DELTA_DIR_LAMBDA", 0.01))
-    delta_mag_lambda = float(os.environ.get("DELTA_MAG_LAMBDA", 0.0))
+    # Student/teacher span endpoints.
+    # These refer to hidden states after block index.
+    # Example: before=6, after=8 means compare transformation from layer 6 output to layer 8 output.
+    transkd_student_before_layer = int(os.environ.get("TRANSKD_STUDENT_BEFORE_LAYER", "6"))
+    transkd_student_after_layer = int(os.environ.get("TRANSKD_STUDENT_AFTER_LAYER", "8"))
+    transkd_teacher_before_layer = int(os.environ.get("TRANSKD_TEACHER_BEFORE_LAYER", "6"))
+    transkd_teacher_after_layer = int(os.environ.get("TRANSKD_TEACHER_AFTER_LAYER", "8"))
+
+    # Token subsampling for [B, T, T] matrices.
+    transkd_token_stride = int(os.environ.get("TRANSKD_TOKEN_STRIDE", "1"))
+    transkd_max_tokens = int(os.environ.get("TRANSKD_MAX_TOKENS", "0"))
+
+    # Teacher model shape for large teacher.
+    transkd_teacher_num_layers = int(os.environ.get("TRANSKD_TEACHER_NUM_LAYERS", "12"))
+    transkd_teacher_model_dim = int(os.environ.get("TRANSKD_TEACHER_MODEL_DIM", "768"))
+    transkd_teacher_num_heads = int(os.environ.get("TRANSKD_TEACHER_NUM_HEADS", "12"))
+    transkd_teacher_num_kv_heads = int(os.environ.get("TRANSKD_TEACHER_NUM_KV_HEADS", "4"))
+    transkd_teacher_mlp_mult = int(os.environ.get("TRANSKD_TEACHER_MLP_MULT", "2"))
+
+
+
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -670,6 +694,7 @@ class GPT(nn.Module):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
+        self.num_layers = num_layers
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
@@ -704,20 +729,50 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
-    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+    def _resolve_hidden_layers(self, hidden_layers: list[int] | tuple[int, ...] | None) -> set[int]:
+        if hidden_layers is None:
+            return set()
+        out: set[int] = set()
+        for layer in hidden_layers:
+            if layer == -1:
+                out.add(self.num_layers - 1)
+            else:
+                if layer < 0 or layer >= self.num_layers:
+                    raise ValueError(f"hidden layer {layer} out of range for num_layers={self.num_layers}")
+                out.add(layer)
+        return out
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        target_ids: Tensor,
+        return_hiddens: bool = False,
+        hidden_layers: list[int] | tuple[int, ...] | None = None,
+    ) -> Tensor | tuple[Tensor, dict[int, Tensor]]:
+        wanted_layers = self._resolve_hidden_layers(hidden_layers) if return_hiddens else set()
+        hiddens: dict[int, Tensor] = {}
+
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
+        layer_idx = 0
 
         # First half stores skips; second half reuses them in reverse order.
         for i in range(self.num_encoder_layers):
             x = self.blocks[i](x, x0)
+            if layer_idx in wanted_layers:
+                hiddens[layer_idx] = x
             skips.append(x)
+            layer_idx += 1
+
         for i in range(self.num_decoder_layers):
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             x = self.blocks[self.num_encoder_layers + i](x, x0)
+            if layer_idx in wanted_layers:
+                hiddens[layer_idx] = x
+            layer_idx += 1
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
@@ -727,172 +782,188 @@ class GPT(nn.Module):
             if self.lm_head is None:
                 raise RuntimeError("lm_head is required when tie_embeddings=False")
             logits_proj = self.lm_head(x)
-        logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-        return F.cross_entropy(logits.float(), targets, reduction="mean")
 
-    def forward_with_deltas(
+        logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+        ce_loss = F.cross_entropy(logits.float(), targets, reduction="mean")
+
+        if return_hiddens:
+            return ce_loss, hiddens
+        return ce_loss
+
+    def forward_hiddens(
         self,
         input_ids: Tensor,
-        target_ids: Tensor | None = None,
-        capture_layers: set[int] | None = None,
-    ) -> dict[str, Tensor | dict[int, Tensor]]:
-        """
-        Forward pass that returns:
-        - optional CE loss
-        - selected layer deltas
-
-        Delta means:
-            delta_l = h_after_block_l - h_before_block_l
-
-        For decoder layers, the skip connection is applied before defining the block delta.
-        So delta measures the transform done by the transformer block after skip injection.
-        """
-        if capture_layers is None:
-            capture_layers = set()
-
-        deltas: dict[int, Tensor] = {}
+        hidden_layers: list[int] | tuple[int, ...],
+    ) -> dict[int, Tensor]:
+        wanted_layers = self._resolve_hidden_layers(hidden_layers)
+        hiddens: dict[int, Tensor] = {}
 
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
+        layer_idx = 0
 
-        # Encoder half.
         for i in range(self.num_encoder_layers):
-            x_before = x
             x = self.blocks[i](x, x0)
-
-            if i in capture_layers:
-                deltas[i] = x - x_before
-
+            if layer_idx in wanted_layers:
+                hiddens[layer_idx] = x
             skips.append(x)
+            layer_idx += 1
 
-        # Decoder half.
-        for j in range(self.num_decoder_layers):
-            layer_idx = self.num_encoder_layers + j
-
+        for i in range(self.num_decoder_layers):
             if skips:
-                x = x + self.skip_weights[j].to(dtype=x.dtype)[None, None, :] * skips.pop()
+                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+            x = self.blocks[self.num_encoder_layers + i](x, x0)
+            if layer_idx in wanted_layers:
+                hiddens[layer_idx] = x
+            layer_idx += 1
 
-            x_before = x
-            x = self.blocks[layer_idx](x, x0)
+        return hiddens
 
-            if layer_idx in capture_layers:
-                deltas[layer_idx] = x - x_before
+# -----------------------------
+# TRANSFORMATION KD LOSSES
+# -----------------------------
 
-        out: dict[str, Tensor | dict[int, Tensor]] = {
-            "deltas": deltas,
-        }
+def _select_token_subset(
+    h: Tensor,
+    token_stride: int = 1,
+    max_tokens: int = 0,
+) -> Tensor:
+    h = h.float()
 
-        if target_ids is not None:
-            x = self.final_norm(x)
+    if token_stride > 1:
+        h = h[:, ::token_stride, :]
 
-            bsz, seqlen, dim = x.shape
-            x_flat = x.reshape(-1, dim)
+    if max_tokens > 0 and h.size(1) > max_tokens:
+        idx = torch.linspace(
+            0,
+            h.size(1) - 1,
+            steps=max_tokens,
+            device=h.device,
+        ).long()
+        h = h.index_select(1, idx)
 
-            if self.tie_embeddings:
-                logits_proj = F.linear(x_flat, self.tok_emb.weight)
-            else:
-                if self.lm_head is None:
-                    raise RuntimeError("lm_head is required when tie_embeddings=False")
-                logits_proj = self.lm_head(x_flat)
-
-            logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-            logits = logits.reshape(bsz, seqlen, -1)
-            ce_loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
-                target_ids.reshape(-1),
-                reduction="mean",
-            )
-            out["ce_loss"] = ce_loss
-
-        return out
+    return h
 
 
+def token_relation_matrix(
+    h: Tensor,
+    token_stride: int = 1,
+    max_tokens: int = 0,
+) -> Tensor:
+    h = _select_token_subset(h, token_stride=token_stride, max_tokens=max_tokens)
+    h = F.normalize(h, dim=-1)
+    return h @ h.transpose(-1, -2)  # [B, T, T]
 
-def delta_distill_losses(
-    student_deltas: dict[int, Tensor],
-    teacher_deltas: dict[int, Tensor],
-    layer_pairs: list[tuple[int, int]],
-    compute_magnitude: bool,
-    eps: float = 1e-6,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+
+def delta_relation_loss(
+    h_s_before: Tensor,
+    h_s_after: Tensor,
+    h_t_before: Tensor,
+    h_t_after: Tensor,
+    token_stride: int = 1,
+    max_tokens: int = 0,
+) -> Tensor:
     """
-    Returns:
-      direction_loss:
-          1 - cosine similarity between student and teacher update directions
+    Experiment 1:
+    Match how the teacher changes token-token geometry.
 
-      magnitude_loss:
-          log-norm MSE between student and teacher update sizes
+    R_before = cosine_matrix(h_before)
+    R_after  = cosine_matrix(h_after)
+    ΔR       = R_after - R_before
 
-      student_norm_mean:
-          mean norm of student deltas
-
-      teacher_norm_mean:
-          mean norm of teacher deltas
+    Loss = MSE(ΔR_student, ΔR_teacher)
     """
-    if not layer_pairs:
-        device = next(iter(student_deltas.values())).device
-        zero = torch.zeros((), device=device)
-        return zero, zero, zero, zero
+    r_s_before = token_relation_matrix(h_s_before, token_stride, max_tokens)
+    r_s_after = token_relation_matrix(h_s_after, token_stride, max_tokens)
+    r_t_before = token_relation_matrix(h_t_before, token_stride, max_tokens)
+    r_t_after = token_relation_matrix(h_t_after, token_stride, max_tokens)
 
-    dir_losses: list[Tensor] = []
-    mag_losses: list[Tensor] = []
-    student_norms: list[Tensor] = []
-    teacher_norms: list[Tensor] = []
+    delta_s = r_s_after - r_s_before
+    delta_t = r_t_after - r_t_before
 
-    for student_layer, teacher_layer in layer_pairs:
-        delta_s = student_deltas[student_layer].float()
-        delta_t = teacher_deltas[teacher_layer].float()
-
-        dir_loss = 1.0 - F.cosine_similarity(
-            delta_s,
-            delta_t,
-            dim=-1,
-            eps=eps,
-        ).mean()
-
-        dir_losses.append(dir_loss)
-
-        norm_s = delta_s.norm(dim=-1).clamp_min(eps)
-        norm_t = delta_t.norm(dim=-1).clamp_min(eps)
-
-        student_norms.append(norm_s.mean())
-        teacher_norms.append(norm_t.mean())
-
-        if compute_magnitude:
-            mag_loss = F.mse_loss(torch.log(norm_s), torch.log(norm_t))
-            mag_losses.append(mag_loss)
-
-    direction_loss = torch.stack(dir_losses).mean()
-
-    if compute_magnitude:
-        magnitude_loss = torch.stack(mag_losses).mean()
-    else:
-        magnitude_loss = torch.zeros((), device=direction_loss.device)
-
-    student_norm_mean = torch.stack(student_norms).mean()
-    teacher_norm_mean = torch.stack(teacher_norms).mean()
-
-    return direction_loss, magnitude_loss, student_norm_mean, teacher_norm_mean
+    return F.mse_loss(delta_s, delta_t)
 
 
-def parse_layer_pairs(spec: str) -> list[tuple[int, int]]:
+def residual_direction_relation_loss(
+    h_s_before: Tensor,
+    h_s_after: Tensor,
+    h_t_before: Tensor,
+    h_t_after: Tensor,
+    token_stride: int = 1,
+    max_tokens: int = 0,
+    eps: float = 1e-8,
+) -> Tensor:
     """
-    Parses "2:2,5:5,8:8" into [(2, 2), (5, 5), (8, 8)].
+    Experiment 2:
+    Match the teacher's residual update direction structure.
 
-    Format:
-        student_layer:teacher_layer
+    Δh_student = h_s_after - h_s_before
+    Δh_teacher = h_t_after - h_t_before
+
+    Since student and teacher hidden dims may differ, we do not compare raw
+    vectors directly. Instead, compare token-token geometry of update directions.
+
+    Loss = MSE(cosine_matrix(Δh_student), cosine_matrix(Δh_teacher))
     """
-    pairs: list[tuple[int, int]] = []
-    if not spec.strip():
-        return pairs
+    d_s = h_s_after.float() - h_s_before.float()
+    d_t = h_t_after.float() - h_t_before.float()
 
-    for item in spec.split(","):
-        left, right = item.split(":")
-        pairs.append((int(left), int(right)))
+    d_s = _select_token_subset(d_s, token_stride=token_stride, max_tokens=max_tokens)
+    d_t = _select_token_subset(d_t, token_stride=token_stride, max_tokens=max_tokens)
 
-    return pairs
+    d_s = F.normalize(d_s, dim=-1, eps=eps)
+    d_t = F.normalize(d_t, dim=-1, eps=eps)
+
+    sim_s = d_s @ d_s.transpose(-1, -2)
+    sim_t = d_t @ d_t.transpose(-1, -2)
+
+    return F.mse_loss(sim_s, sim_t)
+
+
+def transformation_kd_loss(
+    h_s_before: Tensor,
+    h_s_after: Tensor,
+    h_t_before: Tensor,
+    h_t_after: Tensor,
+    mode: str,
+    delta_rel_lambda: float,
+    delta_dir_lambda: float,
+    token_stride: int,
+    max_tokens: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    zero = torch.zeros((), device=h_s_before.device, dtype=torch.float32)
+
+    delta_rel = zero
+    delta_dir = zero
+    total = zero
+
+    if mode in {"delta_rel", "both"}:
+        delta_rel = delta_relation_loss(
+            h_s_before,
+            h_s_after,
+            h_t_before,
+            h_t_after,
+            token_stride=token_stride,
+            max_tokens=max_tokens,
+        )
+        total = total + delta_rel_lambda * delta_rel
+
+    if mode in {"delta_dir", "both"}:
+        delta_dir = residual_direction_relation_loss(
+            h_s_before,
+            h_s_after,
+            h_t_before,
+            h_t_after,
+            token_stride=token_stride,
+            max_tokens=max_tokens,
+        )
+        total = total + delta_dir_lambda * delta_dir
+
+    return total, delta_rel, delta_dir
+
+
 
 # -----------------------------
 # TRAINING
@@ -940,9 +1011,8 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        logdir = Path(__file__).resolve().parent / "logs"
-        logdir.mkdir(exist_ok=True)
-        logfile = logdir / f"{args.run_id}.txt"
+        os.makedirs("logs", exist_ok=True)
+        logfile = f"logs/{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
@@ -1014,20 +1084,17 @@ def main() -> None:
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
+    use_transkd = args.transkd_mode in {"delta_rel", "delta_dir", "both"}
     teacher_model: GPT | None = None
 
-    layer_pairs = parse_layer_pairs(args.distill_layer_pairs)
-    student_capture_layers = {s for s, _ in layer_pairs}
-    teacher_capture_layers = {t for _, t in layer_pairs}
-
-    if args.teacher_path:
+    if use_transkd:
         teacher_model = GPT(
             vocab_size=args.vocab_size,
-            num_layers=args.num_layers,
-            model_dim=args.model_dim,
-            num_heads=args.num_heads,
-            num_kv_heads=args.num_kv_heads,
-            mlp_mult=args.mlp_mult,
+            num_layers=args.transkd_teacher_num_layers,
+            model_dim=args.transkd_teacher_model_dim,
+            num_heads=args.transkd_teacher_num_heads,
+            num_kv_heads=args.transkd_teacher_num_kv_heads,
+            mlp_mult=args.transkd_teacher_mlp_mult,
             tie_embeddings=args.tie_embeddings,
             tied_embed_init_std=args.tied_embed_init_std,
             logit_softcap=args.logit_softcap,
@@ -1035,29 +1102,18 @@ def main() -> None:
             qk_gain_init=args.qk_gain_init,
         ).to(device).bfloat16()
 
+        teacher_state = torch.load(args.transkd_teacher_path, map_location=device)
+        teacher_model.load_state_dict(teacher_state, strict=True)
+
         for module in teacher_model.modules():
             if isinstance(module, CastedLinear):
                 module.float()
 
         restore_low_dim_params_to_fp32(teacher_model)
-
-        if args.teacher_path.endswith(".ptz"):
-            with open(args.teacher_path, "rb") as f:
-                quant_blob = f.read()
-            quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob)), map_location="cpu")
-            teacher_state = dequantize_state_dict_int8(quant_state)
-        else:
-            teacher_state = torch.load(args.teacher_path, map_location="cpu")
-
-        teacher_model.load_state_dict(teacher_state, strict=True)
         teacher_model.eval()
 
         for p in teacher_model.parameters():
             p.requires_grad_(False)
-
-        log0(f"teacher_loaded:{args.teacher_path}")
-        log0(f"distill_layer_pairs:{layer_pairs}")
-
 
 
     # Optimizer split:
@@ -1126,6 +1182,25 @@ def main() -> None:
     )
     log0(f"seed:{args.seed}")
 
+    log0(
+        f"transkd_mode:{args.transkd_mode} "
+        f"transkd_lambda:{args.transkd_lambda} "
+        f"delta_rel_lambda:{args.transkd_delta_rel_lambda} "
+        f"delta_dir_lambda:{args.transkd_delta_dir_lambda} "
+        f"student_span:{args.transkd_student_before_layer}->{args.transkd_student_after_layer} "
+        f"teacher_span:{args.transkd_teacher_before_layer}->{args.transkd_teacher_after_layer} "
+        f"token_stride:{args.transkd_token_stride} max_tokens:{args.transkd_max_tokens}"
+    )
+
+    if args.transkd_mode != "off":
+        log0(
+            f"transkd_teacher_path:{args.transkd_teacher_path} "
+            f"teacher_layers:{args.transkd_teacher_num_layers} "
+            f"teacher_dim:{args.transkd_teacher_model_dim} "
+            f"teacher_heads:{args.transkd_teacher_num_heads} "
+            f"teacher_kv_heads:{args.transkd_teacher_num_kv_heads} "
+            f"teacher_mlp_mult:{args.transkd_teacher_mlp_mult}"
+        )
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
     # -----------------------------
@@ -1224,84 +1299,78 @@ def main() -> None:
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
-
         train_loss = torch.zeros((), device=device)
-        dir_loss_meter = torch.zeros((), device=device)
-        mag_loss_meter = torch.zeros((), device=device)
-        student_norm_meter = torch.zeros((), device=device)
-        teacher_norm_meter = torch.zeros((), device=device)
-
+        ce_loss_sum = torch.zeros((), device=device)
+        kd_loss_sum = torch.zeros((), device=device)
+        delta_rel_loss_sum = torch.zeros((), device=device)
+        delta_dir_loss_sum = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-
-            x, y = train_loader.next_batch(
-                args.train_batch_tokens,
-                args.train_seq_len,
-                grad_accum_steps,
-            )
-
+            x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                if teacher_model is None:
-                    loss = model(x, y)
-                    ce_loss = loss
+                if use_transkd:
+                    if teacher_model is None:
+                        raise RuntimeError("teacher_model is missing despite TRANSKD_MODE being enabled")
 
-                    dir_loss = torch.zeros((), device=device)
-                    mag_loss = torch.zeros((), device=device)
-                    student_norm = torch.zeros((), device=device)
-                    teacher_norm = torch.zeros((), device=device)
+                    student_layers = [
+                        args.transkd_student_before_layer,
+                        args.transkd_student_after_layer,
+                    ]
+                    teacher_layers = [
+                        args.transkd_teacher_before_layer,
+                        args.transkd_teacher_after_layer,
+                    ]
 
-                else:
-                    # Teacher forward: frozen, no gradients.
+                    ce_loss, h_s = model(
+                        x,
+                        y,
+                        return_hiddens=True,
+                        hidden_layers=student_layers,
+                    )
+
                     with torch.no_grad():
-                        teacher_out = teacher_model.forward_with_deltas(
+                        h_t = teacher_model.forward_hiddens(
                             x,
-                            target_ids=None,
-                            capture_layers=teacher_capture_layers,
+                            hidden_layers=teacher_layers,
                         )
 
-                    # Student forward: gradients enabled.
-                    # This bypasses DDP, so use single-GPU for this experiment.
-                    student_out = base_model.forward_with_deltas(
-                        x,
-                        target_ids=y,
-                        capture_layers=student_capture_layers,
+                    h_s_before = h_s[args.transkd_student_before_layer]
+                    h_s_after = h_s[args.transkd_student_after_layer]
+                    h_t_before = h_t[args.transkd_teacher_before_layer]
+                    h_t_after = h_t[args.transkd_teacher_after_layer]
+
+                    kd_loss, delta_rel_loss_val, delta_dir_loss_val = transformation_kd_loss(
+                        h_s_before,
+                        h_s_after,
+                        h_t_before,
+                        h_t_after,
+                        mode=args.transkd_mode,
+                        delta_rel_lambda=args.transkd_delta_rel_lambda,
+                        delta_dir_lambda=args.transkd_delta_dir_lambda,
+                        token_stride=args.transkd_token_stride,
+                        max_tokens=args.transkd_max_tokens,
                     )
 
-                    ce_loss = student_out["ce_loss"]
-                    student_deltas = student_out["deltas"]
-                    teacher_deltas = teacher_out["deltas"]
+                    loss = ce_loss + args.transkd_lambda * kd_loss
+                else:
+                    ce_loss = model(x, y)
+                    kd_loss = torch.zeros((), device=device)
+                    delta_rel_loss_val = torch.zeros((), device=device)
+                    delta_dir_loss_val = torch.zeros((), device=device)
+                    loss = ce_loss
 
-                    assert isinstance(ce_loss, Tensor)
-                    assert isinstance(student_deltas, dict)
-                    assert isinstance(teacher_deltas, dict)
-
-                    dir_loss, mag_loss, student_norm, teacher_norm = delta_distill_losses(
-                        student_deltas,
-                        teacher_deltas,
-                        layer_pairs,
-                        compute_magnitude=args.delta_mag_lambda > 0.0,
-                    )
-
-                    loss = (
-                        ce_loss
-                        + args.delta_dir_lambda * dir_loss
-                        + args.delta_mag_lambda * mag_loss
-                    )
-
-            train_loss += ce_loss.detach()
-            dir_loss_meter += dir_loss.detach()
-            mag_loss_meter += mag_loss.detach()
-            student_norm_meter += student_norm.detach()
-            teacher_norm_meter += teacher_norm.detach()
-
+            train_loss += loss.detach()
+            ce_loss_sum += ce_loss.detach()
+            kd_loss_sum += kd_loss.detach()
+            delta_rel_loss_sum += delta_rel_loss_val.detach()
+            delta_dir_loss_sum += delta_dir_loss_val.detach()
             (loss * grad_scale).backward()
-
         train_loss /= grad_accum_steps
-        dir_loss_meter /= grad_accum_steps
-        mag_loss_meter /= grad_accum_steps
-        student_norm_meter /= grad_accum_steps
-        teacher_norm_meter /= grad_accum_steps
+        ce_loss_avg = ce_loss_sum / grad_accum_steps
+        kd_loss_avg = kd_loss_sum / grad_accum_steps
+        delta_rel_loss_avg = delta_rel_loss_sum / grad_accum_steps
+        delta_dir_loss_avg = delta_dir_loss_sum / grad_accum_steps        
 
         frac = min(step / args.muon_momentum_warmup_steps, 1.0) if args.muon_momentum_warmup_steps > 0 else 1.0
         muon_momentum = (1 - frac) * args.muon_momentum_warmup_start + frac * args.muon_momentum
@@ -1325,23 +1394,21 @@ def main() -> None:
             and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None)
         )
         if should_log_train:
-            if teacher_model is None:
+            if use_transkd:
                 log0(
-                    f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
+                    f"step:{step}/{args.iterations} "
+                    f"train_loss:{train_loss.item():.4f} "
+                    f"ce_loss:{ce_loss_avg.item():.4f} "
+                    f"kd_loss:{kd_loss_avg.item():.4f} "
+                    f"delta_rel:{delta_rel_loss_avg.item():.4f} "
+                    f"delta_dir:{delta_dir_loss_avg.item():.4f} "
+                    f"train_time:{approx_training_time_ms:.0f}ms "
+                    f"step_avg:{approx_training_time_ms / step:.2f}ms"
                 )
             else:
                 log0(
-                    f"step:{step}/{args.iterations} "
-                    f"ce_loss:{train_loss.item():.4f} "
-                    f"delta_dir:{dir_loss_meter.item():.4f} "
-                    f"delta_mag:{mag_loss_meter.item():.4f} "
-                    f"avg_cos:{1.0 - dir_loss_meter.item():.4f} "
-                    f"student_norm:{student_norm_meter.item():.4f} "
-                    f"teacher_norm:{teacher_norm_meter.item():.4f} "
-                    f"norm_ratio:{student_norm_meter.item() / max(teacher_norm_meter.item(), 1e-8):.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms "
-                    f"step_avg:{approx_training_time_ms / step:.2f}ms"
+                    f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
+                    f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
                 )
 
         # Needed to sync whether we've reached the wallclock cap.
@@ -1365,8 +1432,8 @@ def main() -> None:
     # the compressed int8+zlib artifact and validate the round-tripped weights.
 
     if master_process:
-        torch.save(base_model.state_dict(), "teacher_directional.pt")
-        model_bytes = os.path.getsize("teacher_directional.pt")
+        torch.save(base_model.state_dict(), "final_model.pt")
+        model_bytes = os.path.getsize("final_model.pt")
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
@@ -1379,9 +1446,9 @@ def main() -> None:
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("teacher_directional.int8.ptz", "wb") as f:
+        with open("final_model.int8.ptz", "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("teacher_directional.int8.ptz")
+        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
@@ -1392,7 +1459,7 @@ def main() -> None:
 
     if distributed:
         dist.barrier()
-    with open("teacher_directional.int8.ptz", "rb") as f:
+    with open("final_model.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
@@ -1423,3 +1490,94 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+====================================================================================================
+Running Python 3.12.3 (main, Nov  6 2025, 13:44:16) [GCC 13.3.0]
+Running PyTorch 2.9.1+cu128
+Tue May 12 22:37:39 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.133.20             Driver Version: 570.133.20     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:9D:00.0 Off |                    0 |
+| N/A   37C    P0             90W /  700W |    1183MiB /  81559MiB |     10%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           12314      C   /usr/local/bin/python                  1174MiB |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:80
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+model_params:17059912
+world_size:1 grad_accum_steps:8
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+train_batch_tokens:524288 train_seq_len:1024 iterations:620 warmup_steps:20 max_wallclock_seconds:600.000
+seed:1337
+transkd_mode:delta_rel transkd_lambda:0.1 delta_rel_lambda:1.0 delta_dir_lambda:1.0 student_span:6->8 teacher_span:6->8 token_stride:1 max_tokens:0
+transkd_teacher_path:./final_model.pt teacher_layers:12 teacher_dim:768 teacher_heads:12 teacher_kv_heads:4 teacher_mlp_mult:2
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/620 val_loss:6.9357 val_bpb:4.1077 train_time:0ms step_avg:0.02ms
+step:1/620 train_loss:6.9393 ce_loss:6.9357 kd_loss:0.0353 delta_rel:0.0353 delta_dir:0.0000 train_time:6926ms step_avg:6925.83ms
+step:2/620 train_loss:16.7436 ce_loss:16.7402 kd_loss:0.0349 delta_rel:0.0349 delta_dir:0.0000 train_time:7825ms step_avg:3912.45ms
+step:3/620 train_loss:16.2127 ce_loss:16.2090 kd_loss:0.0361 delta_rel:0.0361 delta_dir:0.0000 train_time:8722ms step_avg:2907.35ms
+step:4/620 train_loss:14.7966 ce_loss:14.7931 kd_loss:0.0347 delta_rel:0.0347 delta_dir:0.0000 train_time:9619ms step_avg:2404.86ms
+step:5/620 train_loss:12.7714 ce_loss:12.7679 kd_loss:0.0349 delta_rel:0.0349 delta_dir:0.0000 train_time:10518ms step_avg:2103.63ms
+step:6/620 train_loss:10.4279 ce_loss:10.4244 kd_loss:0.0346 delta_rel:0.0346 delta_dir:0.0000 train_time:11415ms step_avg:1902.50ms
+step:7/620 train_loss:8.3894 ce_loss:8.3860 kd_loss:0.0343 delta_rel:0.0343 delta_dir:0.0000 train_time:12312ms step_avg:1758.86ms
+step:8/620 train_loss:7.0586 ce_loss:7.0551 kd_loss:0.0341 delta_rel:0.0341 delta_dir:0.0000 train_time:13209ms step_avg:1651.13ms
+step:9/620 train_loss:6.2863 ce_loss:6.2828 kd_loss:0.0345 delta_rel:0.0345 delta_dir:0.0000 train_time:14107ms step_avg:1567.44ms
+step:10/620 train_loss:5.9632 ce_loss:5.9597 kd_loss:0.0345 delta_rel:0.0345 delta_dir:0.0000 train_time:15005ms step_avg:1500.55ms
+step:20/620 train_loss:5.4348 ce_loss:5.4314 kd_loss:0.0341 delta_rel:0.0341 delta_dir:0.0000 train_time:23933ms step_avg:1196.66ms
+step:30/620 train_loss:4.7976 ce_loss:4.7948 kd_loss:0.0278 delta_rel:0.0278 delta_dir:0.0000 train_time:32871ms step_avg:1095.70ms
+step:40/620 train_loss:4.4180 ce_loss:4.4157 kd_loss:0.0228 delta_rel:0.0228 delta_dir:0.0000 train_time:41802ms step_avg:1045.04ms
+step:50/620 train_loss:4.2460 ce_loss:4.2439 kd_loss:0.0207 delta_rel:0.0207 delta_dir:0.0000 train_time:50723ms step_avg:1014.46ms
+step:60/620 train_loss:4.0594 ce_loss:4.0577 kd_loss:0.0170 delta_rel:0.0170 delta_dir:0.0000 train_time:59644ms step_avg:994.07ms
+step:70/620 train_loss:3.8197 ce_loss:3.8181 kd_loss:0.0162 delta_rel:0.0162 delta_dir:0.0000 train_time:68565ms step_avg:979.49ms
+step:80/620 train_loss:3.6166 ce_loss:3.6152 kd_loss:0.0142 delta_rel:0.0142 delta_dir:0.0000 train_time:77487ms step_avg:968.59ms
+step:90/620 train_loss:3.4333 ce_loss:3.4320 kd_loss:0.0136 delta_rel:0.0136 delta_dir:0.0000 train_time:86417ms step_avg:960.19ms
+step:100/620 train_loss:3.3285 ce_loss:3.3272 kd_loss:0.0126 delta_rel:0.0126 delta_dir:0.0000 train_time:95340ms step_avg:953.40ms
+step:100/620 val_loss:3.3203 val_bpb:1.9665 train_time:95347ms step_avg:953.47ms
+step:110/620 train_loss:3.1844 ce_loss:3.1832 kd_loss:0.0119 delta_rel:0.0119 delta_dir:0.0000 train_time:104266ms step_avg:947.88ms
+step:120/620 train_loss:3.1723 ce_loss:3.1711 kd_loss:0.0116 delta_rel:0.0116 delta_dir:0.0000 train_time:113188ms step_avg:943.23ms
+step:130/620 train_loss:3.0694 ce_loss:3.0684 kd_loss:0.0109 delta_rel:0.0109 delta_dir:0.0000 train_time:122108ms step_avg:939.29ms
+step:140/620 train_loss:2.9313 ce_loss:2.9303 kd_loss:0.0103 delta_rel:0.0103 delta_dir:0.0000 train_time:131026ms step_avg:935.90ms
+step:150/620 train_loss:2.9576 ce_loss:2.9565 kd_loss:0.0105 delta_rel:0.0105 delta_dir:0.0000 train_time:139948ms step_avg:932.99ms
+step:160/620 train_loss:2.8497 ce_loss:2.8487 kd_loss:0.0099 delta_rel:0.0099 delta_dir:0.0000 train_time:148870ms step_avg:930.44ms
+step:170/620 train_loss:2.9034 ce_loss:2.9024 kd_loss:0.0098 delta_rel:0.0098 delta_dir:0.0000 train_time:157791ms step_avg:928.18ms
+step:180/620 train_loss:2.8062 ce_loss:2.8052 kd_loss:0.0099 delta_rel:0.0099 delta_dir:0.0000 train_time:166727ms step_avg:926.26ms
+step:190/620 train_loss:2.7932 ce_loss:2.7922 kd_loss:0.0097 delta_rel:0.0097 delta_dir:0.0000 train_time:175647ms step_avg:924.46ms
+step:200/620 train_loss:2.7128 ce_loss:2.7119 kd_loss:0.0093 delta_rel:0.0093 delta_dir:0.0000 train_time:184584ms step_avg:922.92ms
+step:200/620 val_loss:2.7614 val_bpb:1.6355 train_time:184590ms step_avg:922.95ms
+step:210/620 train_loss:2.7391 ce_loss:2.7381 kd_loss:0.0095 delta_rel:0.0095 delta_dir:0.0000 train_time:193494ms step_avg:921.40ms

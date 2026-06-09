@@ -1,3 +1,9 @@
+"""
+The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but competitive submissions should stay in the `/records` folder.
+
+Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `train_gpt_mlx.py` never are longer than 1500 lines.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -79,19 +85,6 @@ class Hyperparameters:
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
-
-
-    # -----------------------------
-    # DISTILLATION
-    # -----------------------------
-    teacher_path = os.environ.get("TEACHER_PATH", "./small_teacher.pt")
-
-    # Example: "2:2,5:5,8:8" means student layer 2 matches teacher layer 2, etc.
-    distill_layer_pairs = os.environ.get("DISTILL_LAYER_PAIRS", "8:8")
-
-    # First experiment: set DELTA_MAG_LAMBDA=0.0
-    delta_dir_lambda = float(os.environ.get("DELTA_DIR_LAMBDA", 0.01))
-    delta_mag_lambda = float(os.environ.get("DELTA_MAG_LAMBDA", 0.0))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -730,169 +723,6 @@ class GPT(nn.Module):
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
         return F.cross_entropy(logits.float(), targets, reduction="mean")
 
-    def forward_with_deltas(
-        self,
-        input_ids: Tensor,
-        target_ids: Tensor | None = None,
-        capture_layers: set[int] | None = None,
-    ) -> dict[str, Tensor | dict[int, Tensor]]:
-        """
-        Forward pass that returns:
-        - optional CE loss
-        - selected layer deltas
-
-        Delta means:
-            delta_l = h_after_block_l - h_before_block_l
-
-        For decoder layers, the skip connection is applied before defining the block delta.
-        So delta measures the transform done by the transformer block after skip injection.
-        """
-        if capture_layers is None:
-            capture_layers = set()
-
-        deltas: dict[int, Tensor] = {}
-
-        x = self.tok_emb(input_ids)
-        x = F.rms_norm(x, (x.size(-1),))
-        x0 = x
-        skips: list[Tensor] = []
-
-        # Encoder half.
-        for i in range(self.num_encoder_layers):
-            x_before = x
-            x = self.blocks[i](x, x0)
-
-            if i in capture_layers:
-                deltas[i] = x - x_before
-
-            skips.append(x)
-
-        # Decoder half.
-        for j in range(self.num_decoder_layers):
-            layer_idx = self.num_encoder_layers + j
-
-            if skips:
-                x = x + self.skip_weights[j].to(dtype=x.dtype)[None, None, :] * skips.pop()
-
-            x_before = x
-            x = self.blocks[layer_idx](x, x0)
-
-            if layer_idx in capture_layers:
-                deltas[layer_idx] = x - x_before
-
-        out: dict[str, Tensor | dict[int, Tensor]] = {
-            "deltas": deltas,
-        }
-
-        if target_ids is not None:
-            x = self.final_norm(x)
-
-            bsz, seqlen, dim = x.shape
-            x_flat = x.reshape(-1, dim)
-
-            if self.tie_embeddings:
-                logits_proj = F.linear(x_flat, self.tok_emb.weight)
-            else:
-                if self.lm_head is None:
-                    raise RuntimeError("lm_head is required when tie_embeddings=False")
-                logits_proj = self.lm_head(x_flat)
-
-            logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-            logits = logits.reshape(bsz, seqlen, -1)
-            ce_loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
-                target_ids.reshape(-1),
-                reduction="mean",
-            )
-            out["ce_loss"] = ce_loss
-
-        return out
-
-
-
-def delta_distill_losses(
-    student_deltas: dict[int, Tensor],
-    teacher_deltas: dict[int, Tensor],
-    layer_pairs: list[tuple[int, int]],
-    compute_magnitude: bool,
-    eps: float = 1e-6,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """
-    Returns:
-      direction_loss:
-          1 - cosine similarity between student and teacher update directions
-
-      magnitude_loss:
-          log-norm MSE between student and teacher update sizes
-
-      student_norm_mean:
-          mean norm of student deltas
-
-      teacher_norm_mean:
-          mean norm of teacher deltas
-    """
-    if not layer_pairs:
-        device = next(iter(student_deltas.values())).device
-        zero = torch.zeros((), device=device)
-        return zero, zero, zero, zero
-
-    dir_losses: list[Tensor] = []
-    mag_losses: list[Tensor] = []
-    student_norms: list[Tensor] = []
-    teacher_norms: list[Tensor] = []
-
-    for student_layer, teacher_layer in layer_pairs:
-        delta_s = student_deltas[student_layer].float()
-        delta_t = teacher_deltas[teacher_layer].float()
-
-        dir_loss = 1.0 - F.cosine_similarity(
-            delta_s,
-            delta_t,
-            dim=-1,
-            eps=eps,
-        ).mean()
-
-        dir_losses.append(dir_loss)
-
-        norm_s = delta_s.norm(dim=-1).clamp_min(eps)
-        norm_t = delta_t.norm(dim=-1).clamp_min(eps)
-
-        student_norms.append(norm_s.mean())
-        teacher_norms.append(norm_t.mean())
-
-        if compute_magnitude:
-            mag_loss = F.mse_loss(torch.log(norm_s), torch.log(norm_t))
-            mag_losses.append(mag_loss)
-
-    direction_loss = torch.stack(dir_losses).mean()
-
-    if compute_magnitude:
-        magnitude_loss = torch.stack(mag_losses).mean()
-    else:
-        magnitude_loss = torch.zeros((), device=direction_loss.device)
-
-    student_norm_mean = torch.stack(student_norms).mean()
-    teacher_norm_mean = torch.stack(teacher_norms).mean()
-
-    return direction_loss, magnitude_loss, student_norm_mean, teacher_norm_mean
-
-
-def parse_layer_pairs(spec: str) -> list[tuple[int, int]]:
-    """
-    Parses "2:2,5:5,8:8" into [(2, 2), (5, 5), (8, 8)].
-
-    Format:
-        student_layer:teacher_layer
-    """
-    pairs: list[tuple[int, int]] = []
-    if not spec.strip():
-        return pairs
-
-    for item in spec.split(","):
-        left, right = item.split(":")
-        pairs.append((int(left), int(right)))
-
-    return pairs
 
 # -----------------------------
 # TRAINING
@@ -940,9 +770,8 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        logdir = Path(__file__).resolve().parent / "logs"
-        logdir.mkdir(exist_ok=True)
-        logfile = logdir / f"{args.run_id}.txt"
+        os.makedirs("logs", exist_ok=True)
+        logfile = f"logs/{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
@@ -1013,52 +842,6 @@ def main() -> None:
     restore_low_dim_params_to_fp32(base_model)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
-
-    teacher_model: GPT | None = None
-
-    layer_pairs = parse_layer_pairs(args.distill_layer_pairs)
-    student_capture_layers = {s for s, _ in layer_pairs}
-    teacher_capture_layers = {t for _, t in layer_pairs}
-
-    if args.teacher_path:
-        teacher_model = GPT(
-            vocab_size=args.vocab_size,
-            num_layers=args.num_layers,
-            model_dim=args.model_dim,
-            num_heads=args.num_heads,
-            num_kv_heads=args.num_kv_heads,
-            mlp_mult=args.mlp_mult,
-            tie_embeddings=args.tie_embeddings,
-            tied_embed_init_std=args.tied_embed_init_std,
-            logit_softcap=args.logit_softcap,
-            rope_base=args.rope_base,
-            qk_gain_init=args.qk_gain_init,
-        ).to(device).bfloat16()
-
-        for module in teacher_model.modules():
-            if isinstance(module, CastedLinear):
-                module.float()
-
-        restore_low_dim_params_to_fp32(teacher_model)
-
-        if args.teacher_path.endswith(".ptz"):
-            with open(args.teacher_path, "rb") as f:
-                quant_blob = f.read()
-            quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob)), map_location="cpu")
-            teacher_state = dequantize_state_dict_int8(quant_state)
-        else:
-            teacher_state = torch.load(args.teacher_path, map_location="cpu")
-
-        teacher_model.load_state_dict(teacher_state, strict=True)
-        teacher_model.eval()
-
-        for p in teacher_model.parameters():
-            p.requires_grad_(False)
-
-        log0(f"teacher_loaded:{args.teacher_path}")
-        log0(f"distill_layer_pairs:{layer_pairs}")
-
-
 
     # Optimizer split:
     # - token embedding (Adam) uses EMBED_LR
@@ -1224,84 +1007,16 @@ def main() -> None:
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
-
         train_loss = torch.zeros((), device=device)
-        dir_loss_meter = torch.zeros((), device=device)
-        mag_loss_meter = torch.zeros((), device=device)
-        student_norm_meter = torch.zeros((), device=device)
-        teacher_norm_meter = torch.zeros((), device=device)
-
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-
-            x, y = train_loader.next_batch(
-                args.train_batch_tokens,
-                args.train_seq_len,
-                grad_accum_steps,
-            )
-
+            x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                if teacher_model is None:
-                    loss = model(x, y)
-                    ce_loss = loss
-
-                    dir_loss = torch.zeros((), device=device)
-                    mag_loss = torch.zeros((), device=device)
-                    student_norm = torch.zeros((), device=device)
-                    teacher_norm = torch.zeros((), device=device)
-
-                else:
-                    # Teacher forward: frozen, no gradients.
-                    with torch.no_grad():
-                        teacher_out = teacher_model.forward_with_deltas(
-                            x,
-                            target_ids=None,
-                            capture_layers=teacher_capture_layers,
-                        )
-
-                    # Student forward: gradients enabled.
-                    # This bypasses DDP, so use single-GPU for this experiment.
-                    student_out = base_model.forward_with_deltas(
-                        x,
-                        target_ids=y,
-                        capture_layers=student_capture_layers,
-                    )
-
-                    ce_loss = student_out["ce_loss"]
-                    student_deltas = student_out["deltas"]
-                    teacher_deltas = teacher_out["deltas"]
-
-                    assert isinstance(ce_loss, Tensor)
-                    assert isinstance(student_deltas, dict)
-                    assert isinstance(teacher_deltas, dict)
-
-                    dir_loss, mag_loss, student_norm, teacher_norm = delta_distill_losses(
-                        student_deltas,
-                        teacher_deltas,
-                        layer_pairs,
-                        compute_magnitude=args.delta_mag_lambda > 0.0,
-                    )
-
-                    loss = (
-                        ce_loss
-                        + args.delta_dir_lambda * dir_loss
-                        + args.delta_mag_lambda * mag_loss
-                    )
-
-            train_loss += ce_loss.detach()
-            dir_loss_meter += dir_loss.detach()
-            mag_loss_meter += mag_loss.detach()
-            student_norm_meter += student_norm.detach()
-            teacher_norm_meter += teacher_norm.detach()
-
+                loss = model(x, y)
+            train_loss += loss.detach()
             (loss * grad_scale).backward()
-
         train_loss /= grad_accum_steps
-        dir_loss_meter /= grad_accum_steps
-        mag_loss_meter /= grad_accum_steps
-        student_norm_meter /= grad_accum_steps
-        teacher_norm_meter /= grad_accum_steps
 
         frac = min(step / args.muon_momentum_warmup_steps, 1.0) if args.muon_momentum_warmup_steps > 0 else 1.0
         muon_momentum = (1 - frac) * args.muon_momentum_warmup_start + frac * args.muon_momentum
@@ -1325,24 +1040,10 @@ def main() -> None:
             and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None)
         )
         if should_log_train:
-            if teacher_model is None:
-                log0(
-                    f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
-                )
-            else:
-                log0(
-                    f"step:{step}/{args.iterations} "
-                    f"ce_loss:{train_loss.item():.4f} "
-                    f"delta_dir:{dir_loss_meter.item():.4f} "
-                    f"delta_mag:{mag_loss_meter.item():.4f} "
-                    f"avg_cos:{1.0 - dir_loss_meter.item():.4f} "
-                    f"student_norm:{student_norm_meter.item():.4f} "
-                    f"teacher_norm:{teacher_norm_meter.item():.4f} "
-                    f"norm_ratio:{student_norm_meter.item() / max(teacher_norm_meter.item(), 1e-8):.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms "
-                    f"step_avg:{approx_training_time_ms / step:.2f}ms"
-                )
+            log0(
+                f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
+                f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
+            )
 
         # Needed to sync whether we've reached the wallclock cap.
         reached_cap = max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
@@ -1365,8 +1066,8 @@ def main() -> None:
     # the compressed int8+zlib artifact and validate the round-tripped weights.
 
     if master_process:
-        torch.save(base_model.state_dict(), "teacher_directional.pt")
-        model_bytes = os.path.getsize("teacher_directional.pt")
+        torch.save(base_model.state_dict(), "final_model.pt")
+        model_bytes = os.path.getsize("final_model.pt")
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
@@ -1379,9 +1080,9 @@ def main() -> None:
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("teacher_directional.int8.ptz", "wb") as f:
+        with open("final_model.int8.ptz", "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("teacher_directional.int8.ptz")
+        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
@@ -1392,7 +1093,7 @@ def main() -> None:
 
     if distributed:
         dist.barrier()
-    with open("teacher_directional.int8.ptz", "rb") as f:
+    with open("final_model.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
@@ -1423,3 +1124,135 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+====================================================================================================
+Running Python 3.12.3 (main, Nov  6 2025, 13:44:16) [GCC 13.3.0]
+Running PyTorch 2.9.1+cu128
+Fri Apr 24 17:33:25 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.195.03             Driver Version: 570.195.03     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:1B:00.0 Off |                    0 |
+| N/A   24C    P0             98W /  700W |    1183MiB /  81559MiB |      9%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:80
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+model_params:17059912
+world_size:1 grad_accum_steps:8
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+train_batch_tokens:524288 train_seq_len:1024 iterations:20000 warmup_steps:20 max_wallclock_seconds:600.000
+seed:1337
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+BASELINE
+step:0/20000 val_loss:6.9357 val_bpb:4.1077 train_time:0ms step_avg:0.02ms
+step:1/20000 train_loss:6.9357 train_time:443ms step_avg:442.82ms
+step:2/20000 train_loss:16.7414 train_time:827ms step_avg:413.73ms
+step:3/20000 train_loss:10.3865 train_time:1183ms step_avg:394.46ms
+step:4/20000 train_loss:7.0248 train_time:1574ms step_avg:393.51ms
+step:5/20000 train_loss:6.5187 train_time:1962ms step_avg:392.41ms
+step:6/20000 train_loss:6.4275 train_time:2348ms step_avg:391.25ms
+step:7/20000 train_loss:6.1340 train_time:2729ms step_avg:389.90ms
+step:8/20000 train_loss:6.0453 train_time:3091ms step_avg:386.33ms
+step:9/20000 train_loss:5.9340 train_time:3683ms step_avg:409.24ms
+step:10/20000 train_loss:5.7684 train_time:4080ms step_avg:408.05ms
+step:20/20000 train_loss:4.7393 train_time:7876ms step_avg:393.78ms
+step:30/20000 train_loss:4.4048 train_time:11686ms step_avg:389.53ms
+step:40/20000 train_loss:4.1462 train_time:15375ms step_avg:384.38ms
+step:50/20000 train_loss:3.8985 train_time:19340ms step_avg:386.80ms
+step:60/20000 train_loss:3.7379 train_time:23245ms step_avg:387.42ms
+step:70/20000 train_loss:3.5472 train_time:26976ms step_avg:385.37ms
+step:80/20000 train_loss:3.4333 train_time:30745ms step_avg:384.31ms
+step:90/20000 train_loss:3.2928 train_time:34535ms step_avg:383.73ms
+step:100/20000 train_loss:3.1892 train_time:38290ms step_avg:382.90ms
+step:100/20000 val_loss:3.2003 val_bpb:1.8954 train_time:38298ms step_avg:382.98ms
+step:110/20000 train_loss:3.0888 train_time:41924ms step_avg:381.12ms
+step:120/20000 train_loss:3.0883 train_time:45631ms step_avg:380.26ms
+step:130/20000 train_loss:3.0192 train_time:49374ms step_avg:379.80ms
+step:140/20000 train_loss:2.9110 train_time:53253ms step_avg:380.38ms
+step:150/20000 train_loss:2.9550 train_time:57074ms step_avg:380.49ms
+step:160/20000 train_loss:2.8547 train_time:60974ms step_avg:381.09ms
+step:170/20000 train_loss:2.9118 train_time:64927ms step_avg:381.93ms
+step:180/20000 train_loss:2.8145 train_time:68726ms step_avg:381.81ms
+step:190/20000 train_loss:2.8181 train_time:72476ms step_avg:381.45ms
+step:200/20000 train_loss:2.7330 train_time:76880ms step_avg:384.40ms
+step:200/20000 val_loss:2.7764 val_bpb:1.6444 train_time:77154ms step_avg:385.77ms
+step:210/20000 train_loss:2.7551 train_time:80921ms step_avg:385.34ms
+step:220/20000 train_loss:2.8355 train_time:84544ms step_avg:384.29ms
+step:230/20000 train_loss:2.7733 train_time:88219ms step_avg:383.56ms
+step:240/20000 train_loss:2.7311 train_time:91970ms step_avg:383.21ms
+step:250/20000 train_loss:2.7038 train_time:95977ms step_avg:383.91ms
+step:260/20000 train_loss:2.6504 train_time:99772ms step_avg:383.74ms
+step:270/20000 train_loss:2.6110 train_time:103494ms step_avg:383.31ms
+step:280/20000 train_loss:2.6360 train_time:107482ms step_avg:383.86ms
+step:290/20000 train_loss:2.6454 train_time:111278ms step_avg:383.72ms
+step:300/20000 train_loss:2.5984 train_time:114942ms step_avg:383.14ms
+step:300/20000 val_loss:2.6255 val_bpb:1.5550 train_time:115206ms step_avg:384.02ms
+step:310/20000 train_loss:2.6072 train_time:118882ms step_avg:383.49ms
+step:320/20000 train_loss:2.5949 train_time:122518ms step_avg:382.87ms
+step:330/20000 train_loss:2.6172 train_time:126594ms step_avg:383.62ms
+step:340/20000 train_loss:2.5684 train_time:130373ms step_avg:383.45ms
+step:350/20000 train_loss:2.5888 train_time:134091ms step_avg:383.12ms
+step:360/20000 train_loss:2.5901 train_time:137934ms step_avg:383.15ms
+step:370/20000 train_loss:2.4626 train_time:141894ms step_avg:383.50ms
+step:380/20000 train_loss:2.5432 train_time:145712ms step_avg:383.45ms
+step:390/20000 train_loss:2.5870 train_time:149632ms step_avg:383.67ms
+step:400/20000 train_loss:2.3755 train_time:153433ms step_avg:383.58ms
+step:400/20000 val_loss:2.5398 val_bpb:1.5042 train_time:153452ms step_avg:383.63ms
+step:410/20000 train_loss:2.5350 train_time:157121ms step_avg:383.22ms
+step:420/20000 train_loss:2.4637 train_time:161085ms step_avg:383.54ms
+step:430/20000 train_loss:2.4594 train_time:164947ms step_avg:383.60ms
+step:440/20000 train_loss:2.5387 train_time:168691ms step_avg:383.39ms
+step:450/20000 train_loss:2.4862 train_time:172519ms step_avg:383.37ms
+step:460/20000 train_loss:2.4970 train_time:176291ms step_avg:383.24ms
+step:470/20000 train_loss:2.5075 train_time:180085ms step_avg:383.16ms
+step:480/20000 train_loss:2.4605 train_time:183794ms step_avg:382.90ms
+step:490/20000 train_loss:2.5318 train_time:187692ms step_avg:383.04ms
+step:500/20000 train_loss:2.4740 train_time:191487ms step_avg:382.97ms
+step:500/20000 val_loss:2.4690 val_bpb:1.4623 train_time:191538ms step_avg:383.08ms
+step:510/20000 train_loss:2.3823 train_time:195314ms step_avg:382.97ms
+step:520/20000 train_loss:2.4758 train_time:199100ms step_avg:382.89ms
+step:530/20000 train_loss:2.4893 train_time:203123ms step_avg:383.25ms
+step:540/20000 train_loss:2.2777 train_time:206937ms step_avg:383.22ms
+step:550/20000 train_loss:2.3587 train_time:210637ms step_avg:382.98ms
+step:560/20000 train_loss:2.4543 train_time:214730ms step_avg:383.45ms
+step:570/20000 train_loss:2.4708 train_time:218458ms step_avg:383.26ms
+step:580/20000 train_loss:2.4725 train_time:249257ms step_avg:429.75ms
+step:590/20000 train_loss:2.4425 train_time:253083ms step_avg:428.95ms
+step:600/20000 train_loss:2.4591 train_time:257033ms step_avg:428.39ms
+step:600/20000 val_loss:2.4078 val_bpb:1.4260 train_time:257041ms step_avg:428.40ms

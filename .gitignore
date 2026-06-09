@@ -1,5 +1,4 @@
 running.txt
-logs/
 __pycache__
 large_teacher.int8.ptz
 small_teacher.int8.ptz

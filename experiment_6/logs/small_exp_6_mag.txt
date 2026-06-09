@@ -1423,3 +1423,279 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+====================================================================================================
+Running Python 3.12.3 (main, Nov  6 2025, 13:44:16) [GCC 13.3.0]
+Running PyTorch 2.9.1+cu128
+Tue Jun  2 00:13:23 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.133.20             Driver Version: 570.133.20     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:52:00.0 Off |                    0 |
+| N/A   42C    P0            102W /  700W |    1183MiB /  81559MiB |      5%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           26500      C   /usr/local/bin/python                  1174MiB |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:80
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+teacher_loaded:./small_teacher.pt
+distill_layer_pairs:[(8, 8)]
+model_params:17059912
+world_size:1 grad_accum_steps:8
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+train_batch_tokens:524288 train_seq_len:1024 iterations:1000 warmup_steps:20 max_wallclock_seconds:1200.000
+seed:1337
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/1000 val_loss:6.9357 val_bpb:4.1077 train_time:0ms step_avg:0.02ms
+step:1/1000 ce_loss:6.9358 delta_dir:1.0000 delta_mag:909.5491 avg_cos:0.0000 student_norm:0.0000 teacher_norm:12756767.0000 norm_ratio:0.0000 train_time:1296ms step_avg:1296.37ms
+step:2/1000 ce_loss:16.8407 delta_dir:0.9668 delta_mag:212.4865 avg_cos:0.0332 student_norm:5.8719 teacher_norm:12796070.0000 norm_ratio:0.0000 train_time:2334ms step_avg:1167.18ms
+step:3/1000 ce_loss:9.7747 delta_dir:0.9392 delta_mag:191.0499 avg_cos:0.0608 student_norm:12.5102 teacher_norm:12796540.0000 norm_ratio:0.0000 train_time:3374ms step_avg:1124.66ms
+step:4/1000 ce_loss:6.6184 delta_dir:0.9156 delta_mag:171.8080 avg_cos:0.0844 student_norm:25.5631 teacher_norm:12764221.0000 norm_ratio:0.0000 train_time:4413ms step_avg:1103.18ms
+step:5/1000 ce_loss:6.5071 delta_dir:0.9073 delta_mag:157.7473 avg_cos:0.0927 student_norm:43.9810 teacher_norm:12693588.0000 norm_ratio:0.0000 train_time:5457ms step_avg:1091.33ms
+step:6/1000 ce_loss:6.6871 delta_dir:0.9045 delta_mag:147.1315 avg_cos:0.0955 student_norm:67.0784 teacher_norm:12625727.0000 norm_ratio:0.0000 train_time:6496ms step_avg:1082.59ms
+step:7/1000 ce_loss:6.3835 delta_dir:0.8956 delta_mag:138.1527 avg_cos:0.1044 student_norm:99.4232 teacher_norm:12851914.0000 norm_ratio:0.0000 train_time:7534ms step_avg:1076.32ms
+step:8/1000 ce_loss:6.2198 delta_dir:0.8917 delta_mag:129.8682 avg_cos:0.1083 student_norm:140.4034 teacher_norm:12675328.0000 norm_ratio:0.0000 train_time:8574ms step_avg:1071.81ms
+step:9/1000 ce_loss:6.0922 delta_dir:0.8847 delta_mag:122.5319 avg_cos:0.1153 student_norm:194.1220 teacher_norm:12645734.0000 norm_ratio:0.0000 train_time:9615ms step_avg:1068.34ms
+step:10/1000 ce_loss:5.9985 delta_dir:0.8795 delta_mag:115.9268 avg_cos:0.1205 student_norm:263.1431 teacher_norm:12672029.0000 norm_ratio:0.0000 train_time:10656ms step_avg:1065.61ms
+step:15/1000 ce_loss:5.7425 delta_dir:0.8679 delta_mag:89.2905 avg_cos:0.1321 student_norm:974.5048 teacher_norm:12575067.0000 norm_ratio:0.0001 train_time:15831ms step_avg:1055.41ms
+step:20/1000 ce_loss:5.4779 delta_dir:0.8543 delta_mag:70.0439 avg_cos:0.1457 student_norm:2907.1699 teacher_norm:12728615.0000 norm_ratio:0.0002 train_time:20999ms step_avg:1049.95ms
+step:25/1000 ce_loss:5.1413 delta_dir:0.9163 delta_mag:55.7376 avg_cos:0.0837 student_norm:7340.5850 teacher_norm:12979381.0000 norm_ratio:0.0006 train_time:26169ms step_avg:1046.75ms
+step:30/1000 ce_loss:4.8393 delta_dir:0.9273 delta_mag:42.8667 avg_cos:0.0727 student_norm:18188.9395 teacher_norm:12710514.0000 norm_ratio:0.0014 train_time:31359ms step_avg:1045.31ms
+step:35/1000 ce_loss:4.6121 delta_dir:0.9484 delta_mag:31.8107 avg_cos:0.0516 student_norm:44784.8164 teacher_norm:12539122.0000 norm_ratio:0.0036 train_time:36530ms step_avg:1043.72ms
+step:40/1000 ce_loss:4.5010 delta_dir:0.9634 delta_mag:23.3401 avg_cos:0.0366 student_norm:101938.7969 teacher_norm:12595958.0000 norm_ratio:0.0081 train_time:41701ms step_avg:1042.52ms
+step:45/1000 ce_loss:4.3862 delta_dir:0.9756 delta_mag:15.7432 avg_cos:0.0244 student_norm:248074.5000 teacher_norm:12872302.0000 norm_ratio:0.0193 train_time:46898ms step_avg:1042.17ms
+step:50/1000 ce_loss:4.2849 delta_dir:0.9777 delta_mag:11.9032 avg_cos:0.0223 student_norm:413680.6875 teacher_norm:12694378.0000 norm_ratio:0.0326 train_time:52073ms step_avg:1041.47ms
+step:55/1000 ce_loss:4.1753 delta_dir:0.9892 delta_mag:8.9563 avg_cos:0.0108 student_norm:661392.6875 teacher_norm:12736246.0000 norm_ratio:0.0519 train_time:57257ms step_avg:1041.04ms
+step:60/1000 ce_loss:4.0975 delta_dir:0.9872 delta_mag:7.7218 avg_cos:0.0128 student_norm:832478.8750 teacher_norm:12717070.0000 norm_ratio:0.0655 train_time:62450ms step_avg:1040.84ms
+step:65/1000 ce_loss:3.9389 delta_dir:0.9907 delta_mag:5.7698 avg_cos:0.0093 student_norm:1204404.2500 teacher_norm:12581724.0000 norm_ratio:0.0957 train_time:67629ms step_avg:1040.44ms
+step:70/1000 ce_loss:3.9027 delta_dir:0.9911 delta_mag:5.3488 avg_cos:0.0089 student_norm:1363967.3750 teacher_norm:12751460.0000 norm_ratio:0.1070 train_time:72801ms step_avg:1040.01ms
+step:75/1000 ce_loss:3.8384 delta_dir:0.9909 delta_mag:4.4013 avg_cos:0.0091 student_norm:1694600.1250 teacher_norm:12809355.0000 norm_ratio:0.1323 train_time:77988ms step_avg:1039.84ms
+step:80/1000 ce_loss:3.7792 delta_dir:0.9950 delta_mag:3.4648 avg_cos:0.0050 student_norm:2147744.5000 teacher_norm:12763348.0000 norm_ratio:0.1683 train_time:83168ms step_avg:1039.60ms
+step:85/1000 ce_loss:3.6594 delta_dir:0.9949 delta_mag:3.4017 avg_cos:0.0051 student_norm:2187981.0000 teacher_norm:12561295.0000 norm_ratio:0.1742 train_time:88353ms step_avg:1039.45ms
+step:90/1000 ce_loss:3.6443 delta_dir:0.9956 delta_mag:2.7052 avg_cos:0.0044 student_norm:2667340.5000 teacher_norm:12562022.0000 norm_ratio:0.2123 train_time:93529ms step_avg:1039.22ms
+step:95/1000 ce_loss:3.6808 delta_dir:0.9959 delta_mag:2.5271 avg_cos:0.0041 student_norm:2890700.7500 teacher_norm:12876215.0000 norm_ratio:0.2245 train_time:98700ms step_avg:1038.95ms
+step:100/1000 ce_loss:3.5746 delta_dir:0.9977 delta_mag:2.2788 avg_cos:0.0023 student_norm:3124769.0000 teacher_norm:12692264.0000 norm_ratio:0.2462 train_time:103871ms step_avg:1038.71ms
+step:100/1000 val_loss:3.5877 val_bpb:2.1249 train_time:103877ms step_avg:1038.77ms
+step:105/1000 ce_loss:3.5697 delta_dir:0.9981 delta_mag:1.7571 avg_cos:0.0019 student_norm:3714591.7500 teacher_norm:12702885.0000 norm_ratio:0.2924 train_time:109050ms step_avg:1038.58ms
+step:110/1000 ce_loss:3.4924 delta_dir:0.9947 delta_mag:1.6100 avg_cos:0.0053 student_norm:3909691.5000 teacher_norm:12581466.0000 norm_ratio:0.3108 train_time:114223ms step_avg:1038.39ms
+step:115/1000 ce_loss:3.4714 delta_dir:0.9986 delta_mag:1.5557 avg_cos:0.0014 student_norm:4010247.2500 teacher_norm:12543428.0000 norm_ratio:0.3197 train_time:119400ms step_avg:1038.26ms
+step:120/1000 ce_loss:3.5349 delta_dir:0.9974 delta_mag:1.1910 avg_cos:0.0026 student_norm:4742724.0000 teacher_norm:12796612.0000 norm_ratio:0.3706 train_time:124578ms step_avg:1038.15ms
+step:125/1000 ce_loss:3.4516 delta_dir:0.9968 delta_mag:1.2496 avg_cos:0.0032 student_norm:4620944.0000 teacher_norm:12765823.0000 norm_ratio:0.3620 train_time:129764ms step_avg:1038.12ms
+step:130/1000 ce_loss:3.4433 delta_dir:0.9982 delta_mag:1.0628 avg_cos:0.0018 student_norm:5084364.0000 teacher_norm:12738440.0000 norm_ratio:0.3991 train_time:134948ms step_avg:1038.07ms
+step:135/1000 ce_loss:3.4260 delta_dir:0.9979 delta_mag:0.8416 avg_cos:0.0021 student_norm:5630858.0000 teacher_norm:12636089.0000 norm_ratio:0.4456 train_time:140124ms step_avg:1037.95ms
+step:140/1000 ce_loss:3.3556 delta_dir:0.9984 delta_mag:0.9880 avg_cos:0.0016 student_norm:5213940.0000 teacher_norm:12599039.0000 norm_ratio:0.4138 train_time:145317ms step_avg:1037.98ms
+step:145/1000 ce_loss:3.3826 delta_dir:0.9961 delta_mag:0.7253 avg_cos:0.0039 student_norm:5945111.0000 teacher_norm:12601242.0000 norm_ratio:0.4718 train_time:150491ms step_avg:1037.87ms
+step:150/1000 ce_loss:3.3911 delta_dir:0.9979 delta_mag:0.7422 avg_cos:0.0021 student_norm:5956433.0000 teacher_norm:12758841.0000 norm_ratio:0.4668 train_time:155687ms step_avg:1037.91ms
+step:155/1000 ce_loss:3.3460 delta_dir:0.9998 delta_mag:0.6563 avg_cos:0.0002 student_norm:6260299.5000 teacher_norm:12571142.0000 norm_ratio:0.4980 train_time:160877ms step_avg:1037.91ms
+step:160/1000 ce_loss:3.3014 delta_dir:0.9980 delta_mag:0.6654 avg_cos:0.0020 student_norm:6229574.0000 teacher_norm:12632054.0000 norm_ratio:0.4932 train_time:166053ms step_avg:1037.83ms
+step:165/1000 ce_loss:3.3547 delta_dir:0.9982 delta_mag:0.5057 avg_cos:0.0018 student_norm:6888120.5000 teacher_norm:12644379.0000 norm_ratio:0.5448 train_time:171237ms step_avg:1037.80ms
+step:170/1000 ce_loss:3.3473 delta_dir:1.0007 delta_mag:0.5633 avg_cos:-0.0007 student_norm:6688235.5000 teacher_norm:12810982.0000 norm_ratio:0.5221 train_time:176415ms step_avg:1037.73ms
+step:175/1000 ce_loss:3.2545 delta_dir:0.9997 delta_mag:0.4846 avg_cos:0.0003 student_norm:7004735.0000 teacher_norm:12676446.0000 norm_ratio:0.5526 train_time:181590ms step_avg:1037.66ms
+step:180/1000 ce_loss:3.2595 delta_dir:0.9996 delta_mag:0.4518 avg_cos:0.0004 student_norm:7167118.5000 teacher_norm:12700200.0000 norm_ratio:0.5643 train_time:186782ms step_avg:1037.68ms
+step:185/1000 ce_loss:3.2535 delta_dir:1.0004 delta_mag:0.5324 avg_cos:-0.0004 student_norm:6783972.5000 teacher_norm:12757367.0000 norm_ratio:0.5318 train_time:191953ms step_avg:1037.58ms
+step:190/1000 ce_loss:3.2228 delta_dir:1.0007 delta_mag:0.4304 avg_cos:-0.0007 student_norm:7192944.5000 teacher_norm:12624312.0000 norm_ratio:0.5698 train_time:197132ms step_avg:1037.54ms
+step:195/1000 ce_loss:3.2110 delta_dir:1.0006 delta_mag:0.4739 avg_cos:-0.0006 student_norm:7062884.0000 teacher_norm:12735526.0000 norm_ratio:0.5546 train_time:202988ms step_avg:1040.96ms
+step:200/1000 ce_loss:3.1417 delta_dir:0.9985 delta_mag:0.3870 avg_cos:0.0015 student_norm:7377556.0000 teacher_norm:12577535.0000 norm_ratio:0.5866 train_time:208177ms step_avg:1040.88ms
+step:200/1000 val_loss:3.1769 val_bpb:1.8815 train_time:208184ms step_avg:1040.92ms
+step:205/1000 ce_loss:3.1156 delta_dir:1.0004 delta_mag:0.4167 avg_cos:-0.0004 student_norm:7218238.5000 teacher_norm:12542857.0000 norm_ratio:0.5755 train_time:213357ms step_avg:1040.77ms
+step:210/1000 ce_loss:3.1460 delta_dir:1.0016 delta_mag:0.3462 avg_cos:-0.0016 student_norm:7863136.0000 teacher_norm:12779729.0000 norm_ratio:0.6153 train_time:218534ms step_avg:1040.64ms
+step:215/1000 ce_loss:3.1346 delta_dir:1.0004 delta_mag:0.3794 avg_cos:-0.0004 student_norm:7541381.5000 teacher_norm:12693130.0000 norm_ratio:0.5941 train_time:223717ms step_avg:1040.54ms
+step:220/1000 ce_loss:3.1958 delta_dir:1.0003 delta_mag:0.3116 avg_cos:-0.0003 student_norm:8087750.5000 teacher_norm:12990184.0000 norm_ratio:0.6226 train_time:228888ms step_avg:1040.40ms
+step:225/1000 ce_loss:3.1147 delta_dir:1.0000 delta_mag:0.3220 avg_cos:-0.0000 student_norm:7921380.0000 teacher_norm:12714470.0000 norm_ratio:0.6230 train_time:234080ms step_avg:1040.36ms
+step:230/1000 ce_loss:3.1232 delta_dir:1.0012 delta_mag:0.2727 avg_cos:-0.0012 student_norm:8299364.5000 teacher_norm:12705838.0000 norm_ratio:0.6532 train_time:239255ms step_avg:1040.24ms
+step:235/1000 ce_loss:3.0809 delta_dir:1.0003 delta_mag:0.2971 avg_cos:-0.0003 student_norm:8079518.0000 teacher_norm:12606979.0000 norm_ratio:0.6409 train_time:244450ms step_avg:1040.21ms
+step:240/1000 ce_loss:3.0808 delta_dir:1.0000 delta_mag:0.2126 avg_cos:-0.0000 student_norm:8919649.0000 teacher_norm:12731415.0000 norm_ratio:0.7006 train_time:249624ms step_avg:1040.10ms
+step:245/1000 ce_loss:3.0239 delta_dir:1.0017 delta_mag:0.2405 avg_cos:-0.0017 student_norm:8508911.0000 teacher_norm:12604224.0000 norm_ratio:0.6751 train_time:254808ms step_avg:1040.03ms
+step:250/1000 ce_loss:3.0507 delta_dir:1.0008 delta_mag:0.2396 avg_cos:-0.0008 student_norm:8643154.0000 teacher_norm:12798035.0000 norm_ratio:0.6754 train_time:260001ms step_avg:1040.00ms
+step:255/1000 ce_loss:3.0186 delta_dir:1.0016 delta_mag:0.2199 avg_cos:-0.0016 student_norm:8816518.0000 teacher_norm:12800794.0000 norm_ratio:0.6887 train_time:265185ms step_avg:1039.94ms
+step:260/1000 ce_loss:2.9778 delta_dir:1.0015 delta_mag:0.2118 avg_cos:-0.0015 student_norm:8833348.0000 teacher_norm:12661996.0000 norm_ratio:0.6976 train_time:270364ms step_avg:1039.86ms
+step:265/1000 ce_loss:2.9923 delta_dir:0.9990 delta_mag:0.2208 avg_cos:0.0010 student_norm:8710286.0000 teacher_norm:12647922.0000 norm_ratio:0.6887 train_time:275562ms step_avg:1039.86ms
+step:270/1000 ce_loss:2.9445 delta_dir:0.9997 delta_mag:0.1930 avg_cos:0.0003 student_norm:8977272.0000 teacher_norm:12654145.0000 norm_ratio:0.7094 train_time:280776ms step_avg:1039.91ms
+step:275/1000 ce_loss:2.9528 delta_dir:1.0013 delta_mag:0.2205 avg_cos:-0.0013 student_norm:8650585.0000 teacher_norm:12575517.0000 norm_ratio:0.6879 train_time:285960ms step_avg:1039.86ms
+step:280/1000 ce_loss:2.9678 delta_dir:1.0009 delta_mag:0.1765 avg_cos:-0.0009 student_norm:9156584.0000 teacher_norm:12648845.0000 norm_ratio:0.7239 train_time:291150ms step_avg:1039.82ms
+step:285/1000 ce_loss:2.9860 delta_dir:1.0014 delta_mag:0.1938 avg_cos:-0.0014 student_norm:9067653.0000 teacher_norm:12778901.0000 norm_ratio:0.7096 train_time:296349ms step_avg:1039.82ms
+step:290/1000 ce_loss:2.9679 delta_dir:0.9992 delta_mag:0.1675 avg_cos:0.0008 student_norm:9365822.0000 teacher_norm:12810986.0000 norm_ratio:0.7311 train_time:301536ms step_avg:1039.78ms
+step:295/1000 ce_loss:2.9424 delta_dir:0.9997 delta_mag:0.1517 avg_cos:0.0003 student_norm:9550821.0000 teacher_norm:12657392.0000 norm_ratio:0.7546 train_time:306722ms step_avg:1039.73ms
+step:300/1000 ce_loss:2.9094 delta_dir:1.0002 delta_mag:0.1833 avg_cos:-0.0002 student_norm:9051220.0000 teacher_norm:12613483.0000 norm_ratio:0.7176 train_time:311903ms step_avg:1039.68ms
+step:300/1000 val_loss:2.9372 val_bpb:1.7396 train_time:311909ms step_avg:1039.70ms
+step:305/1000 ce_loss:2.9307 delta_dir:1.0008 delta_mag:0.1550 avg_cos:-0.0008 student_norm:9467938.0000 teacher_norm:12698840.0000 norm_ratio:0.7456 train_time:317079ms step_avg:1039.60ms
+step:310/1000 ce_loss:2.9154 delta_dir:1.0007 delta_mag:0.1295 avg_cos:-0.0007 student_norm:9773826.0000 teacher_norm:12658774.0000 norm_ratio:0.7721 train_time:322259ms step_avg:1039.54ms
+step:315/1000 ce_loss:2.8909 delta_dir:1.0020 delta_mag:0.1484 avg_cos:-0.0020 student_norm:9523946.0000 teacher_norm:12649627.0000 norm_ratio:0.7529 train_time:327430ms step_avg:1039.46ms
+step:320/1000 ce_loss:2.8962 delta_dir:0.9998 delta_mag:0.1677 avg_cos:0.0002 student_norm:9291090.0000 teacher_norm:12745067.0000 norm_ratio:0.7290 train_time:332609ms step_avg:1039.40ms
+step:325/1000 ce_loss:2.9159 delta_dir:1.0010 delta_mag:0.1184 avg_cos:-0.0010 student_norm:10070705.0000 teacher_norm:12759260.0000 norm_ratio:0.7893 train_time:337785ms step_avg:1039.34ms
+step:330/1000 ce_loss:2.9203 delta_dir:1.0014 delta_mag:0.1531 avg_cos:-0.0014 student_norm:9504414.0000 teacher_norm:12772886.0000 norm_ratio:0.7441 train_time:342967ms step_avg:1039.30ms
+step:335/1000 ce_loss:2.9096 delta_dir:1.0012 delta_mag:0.1383 avg_cos:-0.0012 student_norm:9663395.0000 teacher_norm:12741790.0000 norm_ratio:0.7584 train_time:348159ms step_avg:1039.28ms
+step:340/1000 ce_loss:2.8696 delta_dir:1.0020 delta_mag:0.1475 avg_cos:-0.0020 student_norm:9506640.0000 teacher_norm:12638848.0000 norm_ratio:0.7522 train_time:353343ms step_avg:1039.24ms
+step:345/1000 ce_loss:2.8537 delta_dir:1.0013 delta_mag:0.1307 avg_cos:-0.0013 student_norm:9731564.0000 teacher_norm:12644278.0000 norm_ratio:0.7696 train_time:358528ms step_avg:1039.21ms
+step:350/1000 ce_loss:2.8806 delta_dir:0.9997 delta_mag:0.1348 avg_cos:0.0003 student_norm:9770561.0000 teacher_norm:12811340.0000 norm_ratio:0.7626 train_time:363709ms step_avg:1039.17ms
+step:355/1000 ce_loss:2.8953 delta_dir:1.0012 delta_mag:0.1075 avg_cos:-0.0012 student_norm:10293883.0000 teacher_norm:12776913.0000 norm_ratio:0.8057 train_time:368891ms step_avg:1039.13ms
+step:360/1000 ce_loss:2.8754 delta_dir:1.0000 delta_mag:0.1457 avg_cos:-0.0000 student_norm:9477150.0000 teacher_norm:12712996.0000 norm_ratio:0.7455 train_time:374075ms step_avg:1039.10ms
+step:365/1000 ce_loss:2.7696 delta_dir:0.9999 delta_mag:0.1169 avg_cos:0.0001 student_norm:9909242.0000 teacher_norm:12566445.0000 norm_ratio:0.7885 train_time:379256ms step_avg:1039.06ms
+step:370/1000 ce_loss:2.7466 delta_dir:1.0014 delta_mag:0.1194 avg_cos:-0.0014 student_norm:9806495.0000 teacher_norm:12489121.0000 norm_ratio:0.7852 train_time:384441ms step_avg:1039.03ms
+step:375/1000 ce_loss:2.8948 delta_dir:1.0011 delta_mag:0.1148 avg_cos:-0.0011 student_norm:10042343.0000 teacher_norm:12782768.0000 norm_ratio:0.7856 train_time:389618ms step_avg:1038.98ms
+step:380/1000 ce_loss:2.8197 delta_dir:0.9998 delta_mag:0.0994 avg_cos:0.0002 student_norm:10205473.0000 teacher_norm:12636280.0000 norm_ratio:0.8076 train_time:394808ms step_avg:1038.97ms
+step:385/1000 ce_loss:2.8622 delta_dir:1.0009 delta_mag:0.1245 avg_cos:-0.0009 student_norm:9926690.0000 teacher_norm:12811813.0000 norm_ratio:0.7748 train_time:400041ms step_avg:1039.07ms
+step:390/1000 ce_loss:2.8664 delta_dir:1.0015 delta_mag:0.1422 avg_cos:-0.0015 student_norm:9590400.0000 teacher_norm:12699472.0000 norm_ratio:0.7552 train_time:405240ms step_avg:1039.08ms
+step:395/1000 ce_loss:2.7991 delta_dir:1.0000 delta_mag:0.1029 avg_cos:0.0000 student_norm:10214405.0000 teacher_norm:12622499.0000 norm_ratio:0.8092 train_time:410423ms step_avg:1039.05ms
+step:400/1000 ce_loss:2.6527 delta_dir:1.0008 delta_mag:0.1228 avg_cos:-0.0008 student_norm:9662976.0000 teacher_norm:12491314.0000 norm_ratio:0.7736 train_time:415610ms step_avg:1039.02ms
+step:400/1000 val_loss:2.8131 val_bpb:1.6661 train_time:415616ms step_avg:1039.04ms
+step:405/1000 ce_loss:2.8158 delta_dir:1.0003 delta_mag:0.1242 avg_cos:-0.0003 student_norm:9918632.0000 teacher_norm:12816525.0000 norm_ratio:0.7739 train_time:420783ms step_avg:1038.97ms
+step:410/1000 ce_loss:2.8112 delta_dir:0.9992 delta_mag:0.1150 avg_cos:0.0008 student_norm:10077474.0000 teacher_norm:12775066.0000 norm_ratio:0.7888 train_time:425960ms step_avg:1038.93ms
+step:415/1000 ce_loss:2.8538 delta_dir:1.0019 delta_mag:0.0923 avg_cos:-0.0019 student_norm:10530452.0000 teacher_norm:12720401.0000 norm_ratio:0.8278 train_time:431147ms step_avg:1038.91ms
+step:420/1000 ce_loss:2.7357 delta_dir:1.0000 delta_mag:0.1080 avg_cos:-0.0000 student_norm:10006870.0000 teacher_norm:12502556.0000 norm_ratio:0.8004 train_time:436320ms step_avg:1038.86ms
+step:425/1000 ce_loss:2.7719 delta_dir:1.0003 delta_mag:0.1222 avg_cos:-0.0003 student_norm:9801680.0000 teacher_norm:12628469.0000 norm_ratio:0.7762 train_time:441497ms step_avg:1038.82ms
+step:430/1000 ce_loss:2.7279 delta_dir:1.0011 delta_mag:0.1159 avg_cos:-0.0011 student_norm:9938493.0000 teacher_norm:12661065.0000 norm_ratio:0.7850 train_time:446689ms step_avg:1038.81ms
+step:435/1000 ce_loss:2.7543 delta_dir:1.0019 delta_mag:0.1140 avg_cos:-0.0019 student_norm:9921142.0000 teacher_norm:12566952.0000 norm_ratio:0.7895 train_time:451872ms step_avg:1038.79ms
+step:440/1000 ce_loss:2.8132 delta_dir:1.0001 delta_mag:0.0942 avg_cos:-0.0001 student_norm:10408038.0000 teacher_norm:12769714.0000 norm_ratio:0.8151 train_time:457050ms step_avg:1038.75ms
+step:445/1000 ce_loss:2.7909 delta_dir:1.0010 delta_mag:0.1236 avg_cos:-0.0010 student_norm:9784128.0000 teacher_norm:12700894.0000 norm_ratio:0.7703 train_time:462229ms step_avg:1038.72ms
+step:450/1000 ce_loss:2.7476 delta_dir:1.0009 delta_mag:0.0888 avg_cos:-0.0009 student_norm:10414260.0000 teacher_norm:12583136.0000 norm_ratio:0.8276 train_time:467415ms step_avg:1038.70ms
+step:455/1000 ce_loss:2.6813 delta_dir:1.0017 delta_mag:0.1195 avg_cos:-0.0017 student_norm:9772075.0000 teacher_norm:12578112.0000 norm_ratio:0.7769 train_time:472596ms step_avg:1038.67ms
+step:460/1000 ce_loss:2.7681 delta_dir:1.0002 delta_mag:0.0960 avg_cos:-0.0002 student_norm:10405986.0000 teacher_norm:12710328.0000 norm_ratio:0.8187 train_time:477782ms step_avg:1038.66ms
+step:465/1000 ce_loss:2.6879 delta_dir:1.0002 delta_mag:0.1049 avg_cos:-0.0002 student_norm:9969802.0000 teacher_norm:12467899.0000 norm_ratio:0.7996 train_time:482961ms step_avg:1038.63ms
+step:470/1000 ce_loss:2.7615 delta_dir:1.0001 delta_mag:0.1025 avg_cos:-0.0001 student_norm:10266409.0000 teacher_norm:12722420.0000 norm_ratio:0.8070 train_time:488144ms step_avg:1038.61ms
+step:475/1000 ce_loss:2.7652 delta_dir:0.9997 delta_mag:0.0813 avg_cos:0.0003 student_norm:10659390.0000 teacher_norm:12632057.0000 norm_ratio:0.8438 train_time:493323ms step_avg:1038.58ms
+step:480/1000 ce_loss:2.7251 delta_dir:1.0018 delta_mag:0.1091 avg_cos:-0.0018 student_norm:9987560.0000 teacher_norm:12631790.0000 norm_ratio:0.7907 train_time:498499ms step_avg:1038.54ms
+step:485/1000 ce_loss:2.6378 delta_dir:1.0011 delta_mag:0.0988 avg_cos:-0.0011 student_norm:10140106.0000 teacher_norm:12525739.0000 norm_ratio:0.8095 train_time:503690ms step_avg:1038.54ms
+step:490/1000 ce_loss:2.7913 delta_dir:1.0009 delta_mag:0.0932 avg_cos:-0.0009 student_norm:10562972.0000 teacher_norm:12883178.0000 norm_ratio:0.8199 train_time:508874ms step_avg:1038.52ms
+step:495/1000 ce_loss:2.7654 delta_dir:1.0005 delta_mag:0.1060 avg_cos:-0.0005 student_norm:10179429.0000 teacher_norm:12798363.0000 norm_ratio:0.7954 train_time:514068ms step_avg:1038.52ms
+step:500/1000 ce_loss:2.7265 delta_dir:1.0006 delta_mag:0.0876 avg_cos:-0.0006 student_norm:10500728.0000 teacher_norm:12688069.0000 norm_ratio:0.8276 train_time:519257ms step_avg:1038.51ms
+step:500/1000 val_loss:2.7274 val_bpb:1.6153 train_time:519264ms step_avg:1038.53ms
+step:505/1000 ce_loss:2.7600 delta_dir:1.0008 delta_mag:0.0973 avg_cos:-0.0008 student_norm:10198338.0000 teacher_norm:12660864.0000 norm_ratio:0.8055 train_time:524440ms step_avg:1038.50ms
+step:510/1000 ce_loss:2.6332 delta_dir:0.9994 delta_mag:0.0921 avg_cos:0.0006 student_norm:10269764.0000 teacher_norm:12535506.0000 norm_ratio:0.8193 train_time:529621ms step_avg:1038.47ms
+step:515/1000 ce_loss:2.6890 delta_dir:1.0005 delta_mag:0.0978 avg_cos:-0.0005 student_norm:10284116.0000 teacher_norm:12719634.0000 norm_ratio:0.8085 train_time:534808ms step_avg:1038.46ms
+step:520/1000 ce_loss:2.7205 delta_dir:1.0003 delta_mag:0.0861 avg_cos:-0.0003 student_norm:10621624.0000 teacher_norm:12719455.0000 norm_ratio:0.8351 train_time:540000ms step_avg:1038.46ms
+step:525/1000 ce_loss:2.7882 delta_dir:0.9998 delta_mag:0.1039 avg_cos:0.0002 student_norm:10185088.0000 teacher_norm:12782866.0000 norm_ratio:0.7968 train_time:545195ms step_avg:1038.47ms
+step:530/1000 ce_loss:2.7284 delta_dir:0.9993 delta_mag:0.0816 avg_cos:0.0007 student_norm:10736410.0000 teacher_norm:12672185.0000 norm_ratio:0.8472 train_time:550377ms step_avg:1038.45ms
+step:535/1000 ce_loss:2.7037 delta_dir:1.0002 delta_mag:0.0973 avg_cos:-0.0002 student_norm:10150042.0000 teacher_norm:12633003.0000 norm_ratio:0.8035 train_time:555564ms step_avg:1038.44ms
+step:540/1000 ce_loss:2.5361 delta_dir:1.0007 delta_mag:0.0966 avg_cos:-0.0007 student_norm:10084668.0000 teacher_norm:12418329.0000 norm_ratio:0.8121 train_time:560742ms step_avg:1038.41ms
+step:545/1000 ce_loss:2.7534 delta_dir:0.9997 delta_mag:0.0941 avg_cos:0.0003 student_norm:10385407.0000 teacher_norm:12817039.0000 norm_ratio:0.8103 train_time:565921ms step_avg:1038.39ms
+step:550/1000 ce_loss:2.6036 delta_dir:1.0009 delta_mag:0.0830 avg_cos:-0.0009 student_norm:10415996.0000 teacher_norm:12465284.0000 norm_ratio:0.8356 train_time:571108ms step_avg:1038.38ms
+step:555/1000 ce_loss:2.7445 delta_dir:1.0001 delta_mag:0.0947 avg_cos:-0.0001 student_norm:10352403.0000 teacher_norm:12747908.0000 norm_ratio:0.8121 train_time:576292ms step_avg:1038.36ms
+step:560/1000 ce_loss:2.6957 delta_dir:1.0000 delta_mag:0.0858 avg_cos:0.0000 student_norm:10532930.0000 teacher_norm:12710833.0000 norm_ratio:0.8287 train_time:581477ms step_avg:1038.35ms
+step:565/1000 ce_loss:2.6635 delta_dir:0.9989 delta_mag:0.0831 avg_cos:0.0011 student_norm:10567454.0000 teacher_norm:12647472.0000 norm_ratio:0.8355 train_time:586663ms step_avg:1038.34ms
+step:570/1000 ce_loss:2.7115 delta_dir:1.0007 delta_mag:0.0893 avg_cos:-0.0007 student_norm:10597174.0000 teacher_norm:12859228.0000 norm_ratio:0.8241 train_time:591845ms step_avg:1038.32ms
+step:575/1000 ce_loss:2.6472 delta_dir:0.9993 delta_mag:0.0957 avg_cos:0.0007 student_norm:10307824.0000 teacher_norm:12689464.0000 norm_ratio:0.8123 train_time:597089ms step_avg:1038.42ms
+step:580/1000 ce_loss:2.7194 delta_dir:0.9990 delta_mag:0.0808 avg_cos:0.0010 student_norm:10706184.0000 teacher_norm:12734880.0000 norm_ratio:0.8407 train_time:602270ms step_avg:1038.40ms
+step:585/1000 ce_loss:2.6415 delta_dir:1.0004 delta_mag:0.0941 avg_cos:-0.0004 student_norm:10248355.0000 teacher_norm:12652368.0000 norm_ratio:0.8100 train_time:607454ms step_avg:1038.38ms
+step:590/1000 ce_loss:2.6850 delta_dir:1.0003 delta_mag:0.0785 avg_cos:-0.0003 student_norm:10681123.0000 teacher_norm:12677243.0000 norm_ratio:0.8425 train_time:612635ms step_avg:1038.36ms
+step:595/1000 ce_loss:2.5463 delta_dir:1.0005 delta_mag:0.1040 avg_cos:-0.0005 student_norm:9905253.0000 teacher_norm:12483710.0000 norm_ratio:0.7935 train_time:617824ms step_avg:1038.36ms
+step:600/1000 ce_loss:2.7080 delta_dir:0.9992 delta_mag:0.0856 avg_cos:0.0008 student_norm:10594086.0000 teacher_norm:12817361.0000 norm_ratio:0.8265 train_time:623009ms step_avg:1038.35ms
+step:600/1000 val_loss:2.6565 val_bpb:1.5734 train_time:623018ms step_avg:1038.36ms
+step:605/1000 ce_loss:2.6915 delta_dir:1.0002 delta_mag:0.0839 avg_cos:-0.0002 student_norm:10688212.0000 teacher_norm:12797923.0000 norm_ratio:0.8352 train_time:628187ms step_avg:1038.33ms
+step:610/1000 ce_loss:2.7002 delta_dir:0.9994 delta_mag:0.0873 avg_cos:0.0006 student_norm:10521586.0000 teacher_norm:12738652.0000 norm_ratio:0.8260 train_time:633370ms step_avg:1038.31ms
+step:615/1000 ce_loss:2.6547 delta_dir:1.0010 delta_mag:0.0810 avg_cos:-0.0010 student_norm:10603558.0000 teacher_norm:12653656.0000 norm_ratio:0.8380 train_time:638549ms step_avg:1038.29ms
+step:620/1000 ce_loss:2.6594 delta_dir:0.9993 delta_mag:0.0767 avg_cos:0.0007 student_norm:10688349.0000 teacher_norm:12618498.0000 norm_ratio:0.8470 train_time:643720ms step_avg:1038.26ms
+step:625/1000 ce_loss:2.7122 delta_dir:0.9997 delta_mag:0.0941 avg_cos:0.0003 student_norm:10484264.0000 teacher_norm:12945954.0000 norm_ratio:0.8098 train_time:648902ms step_avg:1038.24ms
+step:630/1000 ce_loss:2.6881 delta_dir:0.9988 delta_mag:0.0744 avg_cos:0.0012 student_norm:10922397.0000 teacher_norm:12818982.0000 norm_ratio:0.8520 train_time:654088ms step_avg:1038.23ms
+step:635/1000 ce_loss:2.6596 delta_dir:1.0009 delta_mag:0.0962 avg_cos:-0.0009 student_norm:10268304.0000 teacher_norm:12758242.0000 norm_ratio:0.8048 train_time:659270ms step_avg:1038.22ms
+step:640/1000 ce_loss:2.5754 delta_dir:0.9991 delta_mag:0.0784 avg_cos:0.0009 student_norm:10495906.0000 teacher_norm:12568929.0000 norm_ratio:0.8351 train_time:664448ms step_avg:1038.20ms
+step:645/1000 ce_loss:2.6077 delta_dir:0.9993 delta_mag:0.0841 avg_cos:0.0007 student_norm:10490439.0000 teacher_norm:12662467.0000 norm_ratio:0.8285 train_time:669622ms step_avg:1038.17ms
+step:650/1000 ce_loss:2.5169 delta_dir:1.0008 delta_mag:0.0858 avg_cos:-0.0008 student_norm:10320548.0000 teacher_norm:12471162.0000 norm_ratio:0.8276 train_time:674802ms step_avg:1038.16ms
+step:655/1000 ce_loss:2.6076 delta_dir:0.9993 delta_mag:0.0800 avg_cos:0.0007 student_norm:10620790.0000 teacher_norm:12682968.0000 norm_ratio:0.8374 train_time:679983ms step_avg:1038.14ms
+step:660/1000 ce_loss:2.6946 delta_dir:0.9995 delta_mag:0.0872 avg_cos:0.0005 student_norm:10516645.0000 teacher_norm:12795619.0000 norm_ratio:0.8219 train_time:685167ms step_avg:1038.13ms
+step:665/1000 ce_loss:2.6291 delta_dir:1.0005 delta_mag:0.0738 avg_cos:-0.0005 student_norm:10737866.0000 teacher_norm:12657551.0000 norm_ratio:0.8483 train_time:690345ms step_avg:1038.11ms
+step:670/1000 ce_loss:2.6436 delta_dir:0.9994 delta_mag:0.0898 avg_cos:0.0006 student_norm:10339948.0000 teacher_norm:12669066.0000 norm_ratio:0.8162 train_time:695519ms step_avg:1038.09ms
+step:675/1000 ce_loss:2.5012 delta_dir:1.0002 delta_mag:0.0774 avg_cos:-0.0002 student_norm:10479807.0000 teacher_norm:12493482.0000 norm_ratio:0.8388 train_time:700701ms step_avg:1038.08ms
+step:680/1000 ce_loss:2.6648 delta_dir:0.9988 delta_mag:0.0861 avg_cos:0.0012 student_norm:10546785.0000 teacher_norm:12851414.0000 norm_ratio:0.8207 train_time:705884ms step_avg:1038.07ms
+step:685/1000 ce_loss:2.5053 delta_dir:1.0006 delta_mag:0.0787 avg_cos:-0.0006 student_norm:10474179.0000 teacher_norm:12459061.0000 norm_ratio:0.8407 train_time:711067ms step_avg:1038.05ms
+step:690/1000 ce_loss:2.6280 delta_dir:1.0009 delta_mag:0.0787 avg_cos:-0.0009 student_norm:10612465.0000 teacher_norm:12671120.0000 norm_ratio:0.8375 train_time:716246ms step_avg:1038.04ms
+step:695/1000 ce_loss:2.6324 delta_dir:0.9999 delta_mag:0.0841 avg_cos:0.0001 student_norm:10508278.0000 teacher_norm:12696916.0000 norm_ratio:0.8276 train_time:721422ms step_avg:1038.02ms
+step:700/1000 ce_loss:2.6470 delta_dir:1.0005 delta_mag:0.0840 avg_cos:-0.0005 student_norm:10589820.0000 teacher_norm:12719912.0000 norm_ratio:0.8325 train_time:726612ms step_avg:1038.02ms
+step:700/1000 val_loss:2.6021 val_bpb:1.5411 train_time:726619ms step_avg:1038.03ms
+step:705/1000 ce_loss:2.6007 delta_dir:0.9986 delta_mag:0.0805 avg_cos:0.0014 student_norm:10686571.0000 teacher_norm:12721423.0000 norm_ratio:0.8400 train_time:731782ms step_avg:1037.99ms
+step:710/1000 ce_loss:2.5684 delta_dir:1.0005 delta_mag:0.0890 avg_cos:-0.0005 student_norm:10371671.0000 teacher_norm:12630639.0000 norm_ratio:0.8212 train_time:736951ms step_avg:1037.96ms
+step:715/1000 ce_loss:2.5866 delta_dir:0.9994 delta_mag:0.0736 avg_cos:0.0006 student_norm:10752992.0000 teacher_norm:12616567.0000 norm_ratio:0.8523 train_time:742137ms step_avg:1037.95ms
+step:720/1000 ce_loss:2.5231 delta_dir:0.9998 delta_mag:0.0912 avg_cos:0.0002 student_norm:10231432.0000 teacher_norm:12491269.0000 norm_ratio:0.8191 train_time:747319ms step_avg:1037.94ms
+step:725/1000 ce_loss:2.6436 delta_dir:0.9999 delta_mag:0.0885 avg_cos:0.0001 student_norm:10550021.0000 teacher_norm:12878930.0000 norm_ratio:0.8192 train_time:752506ms step_avg:1037.94ms
+step:730/1000 ce_loss:2.6278 delta_dir:0.9998 delta_mag:0.0914 avg_cos:0.0002 student_norm:10457529.0000 teacher_norm:12879822.0000 norm_ratio:0.8119 train_time:757683ms step_avg:1037.92ms
+step:735/1000 ce_loss:2.5089 delta_dir:0.9997 delta_mag:0.0835 avg_cos:0.0003 student_norm:10423654.0000 teacher_norm:12576778.0000 norm_ratio:0.8288 train_time:762861ms step_avg:1037.91ms
+step:740/1000 ce_loss:2.5829 delta_dir:0.9999 delta_mag:0.0788 avg_cos:0.0001 student_norm:10694716.0000 teacher_norm:12750034.0000 norm_ratio:0.8388 train_time:768038ms step_avg:1037.89ms
+step:745/1000 ce_loss:2.6372 delta_dir:0.9998 delta_mag:0.0743 avg_cos:0.0002 student_norm:10817593.0000 teacher_norm:12805462.0000 norm_ratio:0.8448 train_time:773214ms step_avg:1037.87ms
+step:750/1000 ce_loss:2.5433 delta_dir:0.9995 delta_mag:0.0839 avg_cos:0.0005 student_norm:10412502.0000 teacher_norm:12525908.0000 norm_ratio:0.8313 train_time:778391ms step_avg:1037.85ms
+step:755/1000 ce_loss:2.5623 delta_dir:1.0003 delta_mag:0.0782 avg_cos:-0.0003 student_norm:10555753.0000 teacher_norm:12599400.0000 norm_ratio:0.8378 train_time:783574ms step_avg:1037.85ms
+step:760/1000 ce_loss:2.5166 delta_dir:1.0002 delta_mag:0.0889 avg_cos:-0.0002 student_norm:10265800.0000 teacher_norm:12552992.0000 norm_ratio:0.8178 train_time:788753ms step_avg:1037.83ms
+step:765/1000 ce_loss:2.5235 delta_dir:0.9998 delta_mag:0.0836 avg_cos:0.0002 student_norm:10478103.0000 teacher_norm:12657155.0000 norm_ratio:0.8278 train_time:936958ms step_avg:1224.78ms
+step:770/1000 ce_loss:2.5706 delta_dir:0.9998 delta_mag:0.0816 avg_cos:0.0002 student_norm:10616877.0000 teacher_norm:12745812.0000 norm_ratio:0.8330 train_time:942129ms step_avg:1223.54ms
+step:775/1000 ce_loss:2.6133 delta_dir:0.9997 delta_mag:0.0896 avg_cos:0.0003 student_norm:10491869.0000 teacher_norm:12896489.0000 norm_ratio:0.8135 train_time:947314ms step_avg:1222.34ms
+step:780/1000 ce_loss:2.5530 delta_dir:0.9995 delta_mag:0.0807 avg_cos:0.0005 student_norm:10501001.0000 teacher_norm:12676243.0000 norm_ratio:0.8284 train_time:952511ms step_avg:1221.17ms
+step:785/1000 ce_loss:2.5629 delta_dir:1.0001 delta_mag:0.0889 avg_cos:-0.0001 student_norm:10337474.0000 teacher_norm:12702355.0000 norm_ratio:0.8138 train_time:957686ms step_avg:1219.98ms
+step:790/1000 ce_loss:2.5709 delta_dir:1.0003 delta_mag:0.0852 avg_cos:-0.0003 student_norm:10440905.0000 teacher_norm:12730111.0000 norm_ratio:0.8202 train_time:962857ms step_avg:1218.81ms
+step:795/1000 ce_loss:2.5353 delta_dir:0.9999 delta_mag:0.0839 avg_cos:0.0001 student_norm:10383172.0000 teacher_norm:12617914.0000 norm_ratio:0.8229 train_time:968027ms step_avg:1217.64ms
+step:800/1000 ce_loss:2.5200 delta_dir:0.9999 delta_mag:0.0841 avg_cos:0.0001 student_norm:10296219.0000 teacher_norm:12512102.0000 norm_ratio:0.8229 train_time:973215ms step_avg:1216.52ms
+step:800/1000 val_loss:2.5489 val_bpb:1.5096 train_time:973222ms step_avg:1216.53ms
+step:805/1000 ce_loss:2.5313 delta_dir:1.0002 delta_mag:0.0881 avg_cos:-0.0002 student_norm:10301991.0000 teacher_norm:12664552.0000 norm_ratio:0.8135 train_time:978386ms step_avg:1215.39ms
+step:810/1000 ce_loss:2.5763 delta_dir:1.0000 delta_mag:0.0850 avg_cos:0.0000 student_norm:10544192.0000 teacher_norm:12859352.0000 norm_ratio:0.8200 train_time:983585ms step_avg:1214.30ms
+step:815/1000 ce_loss:2.5252 delta_dir:1.0000 delta_mag:0.0832 avg_cos:-0.0000 student_norm:10482490.0000 teacher_norm:12720206.0000 norm_ratio:0.8241 train_time:988771ms step_avg:1213.22ms
+step:820/1000 ce_loss:2.5260 delta_dir:0.9997 delta_mag:0.0883 avg_cos:0.0003 student_norm:10360480.0000 teacher_norm:12708134.0000 norm_ratio:0.8153 train_time:993955ms step_avg:1212.14ms
+step:825/1000 ce_loss:2.6102 delta_dir:0.9998 delta_mag:0.0830 avg_cos:0.0002 student_norm:10586197.0000 teacher_norm:12854752.0000 norm_ratio:0.8235 train_time:999122ms step_avg:1211.06ms
+step:830/1000 ce_loss:2.5623 delta_dir:1.0006 delta_mag:0.0871 avg_cos:-0.0006 student_norm:10363776.0000 teacher_norm:12689303.0000 norm_ratio:0.8167 train_time:1004297ms step_avg:1210.00ms
+step:835/1000 ce_loss:2.5516 delta_dir:1.0007 delta_mag:0.0869 avg_cos:-0.0007 student_norm:10276600.0000 teacher_norm:12604194.0000 norm_ratio:0.8153 train_time:1009467ms step_avg:1208.94ms
+step:840/1000 ce_loss:2.5355 delta_dir:1.0001 delta_mag:0.0899 avg_cos:-0.0001 student_norm:10298009.0000 teacher_norm:12713950.0000 norm_ratio:0.8100 train_time:1014645ms step_avg:1207.91ms
+step:845/1000 ce_loss:2.5655 delta_dir:1.0000 delta_mag:0.0857 avg_cos:-0.0000 student_norm:10317324.0000 teacher_norm:12642710.0000 norm_ratio:0.8161 train_time:1019825ms step_avg:1206.89ms
+step:850/1000 ce_loss:2.6220 delta_dir:0.9999 delta_mag:0.0870 avg_cos:0.0001 student_norm:10544064.0000 teacher_norm:12918038.0000 norm_ratio:0.8162 train_time:1025015ms step_avg:1205.90ms
+step:855/1000 ce_loss:2.5699 delta_dir:0.9994 delta_mag:0.0871 avg_cos:0.0006 student_norm:10418422.0000 teacher_norm:12775611.0000 norm_ratio:0.8155 train_time:1030203ms step_avg:1204.92ms
+step:860/1000 ce_loss:2.5264 delta_dir:0.9999 delta_mag:0.0876 avg_cos:0.0001 student_norm:10417540.0000 teacher_norm:12786605.0000 norm_ratio:0.8147 train_time:1035386ms step_avg:1203.94ms
+step:865/1000 ce_loss:2.5554 delta_dir:1.0006 delta_mag:0.0852 avg_cos:-0.0006 student_norm:10437144.0000 teacher_norm:12753408.0000 norm_ratio:0.8184 train_time:1040576ms step_avg:1202.98ms
+step:870/1000 ce_loss:2.5659 delta_dir:1.0006 delta_mag:0.0843 avg_cos:-0.0006 student_norm:10388411.0000 teacher_norm:12673480.0000 norm_ratio:0.8197 train_time:1045751ms step_avg:1202.01ms
+step:875/1000 ce_loss:2.5229 delta_dir:1.0006 delta_mag:0.0844 avg_cos:-0.0006 student_norm:10337986.0000 teacher_norm:12613347.0000 norm_ratio:0.8196 train_time:1050930ms step_avg:1201.06ms
+step:880/1000 ce_loss:2.5152 delta_dir:1.0003 delta_mag:0.0886 avg_cos:-0.0003 student_norm:10300583.0000 teacher_norm:12686212.0000 norm_ratio:0.8120 train_time:1056120ms step_avg:1200.14ms
+step:885/1000 ce_loss:2.4920 delta_dir:0.9999 delta_mag:0.0827 avg_cos:0.0001 student_norm:10391571.0000 teacher_norm:12543631.0000 norm_ratio:0.8284 train_time:1061305ms step_avg:1199.21ms
+step:890/1000 ce_loss:2.4990 delta_dir:1.0003 delta_mag:0.0804 avg_cos:-0.0003 student_norm:10458826.0000 teacher_norm:12654136.0000 norm_ratio:0.8265 train_time:1066493ms step_avg:1198.31ms
+step:895/1000 ce_loss:2.4768 delta_dir:0.9999 delta_mag:0.0839 avg_cos:0.0001 student_norm:10412028.0000 teacher_norm:12689957.0000 norm_ratio:0.8205 train_time:1071675ms step_avg:1197.40ms
+step:900/1000 ce_loss:2.5430 delta_dir:1.0000 delta_mag:0.0873 avg_cos:-0.0000 student_norm:10448875.0000 teacher_norm:12846187.0000 norm_ratio:0.8134 train_time:1076881ms step_avg:1196.53ms
+step:900/1000 val_loss:2.5231 val_bpb:1.4943 train_time:1076888ms step_avg:1196.54ms
+step:905/1000 ce_loss:2.4937 delta_dir:1.0002 delta_mag:0.0960 avg_cos:-0.0002 student_norm:10388436.0000 teacher_norm:12990723.0000 norm_ratio:0.7997 train_time:1082063ms step_avg:1195.65ms
+step:910/1000 ce_loss:2.5971 delta_dir:1.0010 delta_mag:0.0852 avg_cos:-0.0010 student_norm:10418927.0000 teacher_norm:12747826.0000 norm_ratio:0.8173 train_time:1087253ms step_avg:1194.78ms
+step:915/1000 ce_loss:2.5412 delta_dir:1.0006 delta_mag:0.0835 avg_cos:-0.0006 student_norm:10379929.0000 teacher_norm:12663640.0000 norm_ratio:0.8197 train_time:1092438ms step_avg:1193.92ms
+step:920/1000 ce_loss:2.4888 delta_dir:1.0007 delta_mag:0.0870 avg_cos:-0.0007 student_norm:10261004.0000 teacher_norm:12621103.0000 norm_ratio:0.8130 train_time:1097621ms step_avg:1193.07ms
+step:925/1000 ce_loss:2.4495 delta_dir:1.0002 delta_mag:0.1005 avg_cos:-0.0002 student_norm:10176401.0000 teacher_norm:11975763.0000 norm_ratio:0.8497 train_time:1102815ms step_avg:1192.23ms
+step:930/1000 ce_loss:2.5048 delta_dir:1.0003 delta_mag:0.0873 avg_cos:-0.0003 student_norm:10322046.0000 teacher_norm:12676835.0000 norm_ratio:0.8142 train_time:1108005ms step_avg:1191.40ms
+step:935/1000 ce_loss:2.4705 delta_dir:1.0001 delta_mag:0.0958 avg_cos:-0.0001 student_norm:10158268.0000 teacher_norm:12713209.0000 norm_ratio:0.7990 train_time:1113203ms step_avg:1190.59ms
+step:940/1000 ce_loss:2.5327 delta_dir:1.0002 delta_mag:0.0862 avg_cos:-0.0002 student_norm:10425081.0000 teacher_norm:12777734.0000 norm_ratio:0.8159 train_time:1118384ms step_avg:1189.77ms
+step:945/1000 ce_loss:2.5864 delta_dir:1.0000 delta_mag:0.0862 avg_cos:-0.0000 student_norm:10491592.0000 teacher_norm:12864922.0000 norm_ratio:0.8155 train_time:1123559ms step_avg:1188.95ms
+step:950/1000 ce_loss:2.5532 delta_dir:1.0004 delta_mag:0.0848 avg_cos:-0.0004 student_norm:10367525.0000 teacher_norm:12651165.0000 norm_ratio:0.8195 train_time:1128757ms step_avg:1188.17ms
+step:954/1000 val_loss:2.5132 val_bpb:1.4884 train_time:1254103ms step_avg:1314.57ms
+stopping_early: wallclock_cap train_time:1254103ms step:954/1000
+peak memory allocated: 14522 MiB reserved: 15104 MiB
+Serialized model: 67225767 bytes
+Code size: 57697 bytes
+Total submission size: 67283464 bytes
+Serialized model int8+zlib: 12514588 bytes (payload:17178912 raw_torch:17224025 payload_ratio:3.91x)
+Total submission size int8+zlib: 12572285 bytes
+final_int8_zlib_roundtrip val_loss:2.5178 val_bpb:1.4912 eval_time:11147ms
+final_int8_zlib_roundtrip_exact val_loss:2.51777211 val_bpb:1.49116647

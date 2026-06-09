@@ -1,3 +1,9 @@
+"""
+The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but competitive submissions should stay in the `/records` folder.
+
+Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `train_gpt_mlx.py` never are longer than 1500 lines.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -80,18 +86,16 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
-
-    # -----------------------------
-    # DISTILLATION
-    # -----------------------------
-    teacher_path = os.environ.get("TEACHER_PATH", "./small_teacher.pt")
-
-    # Example: "2:2,5:5,8:8" means student layer 2 matches teacher layer 2, etc.
-    distill_layer_pairs = os.environ.get("DISTILL_LAYER_PAIRS", "8:8")
-
-    # First experiment: set DELTA_MAG_LAMBDA=0.0
-    delta_dir_lambda = float(os.environ.get("DELTA_DIR_LAMBDA", 0.01))
-    delta_mag_lambda = float(os.environ.get("DELTA_MAG_LAMBDA", 0.0))
+    # Teacher-subspace regularization (reg-only ablation).
+    subspace_reg_enabled = bool(int(os.environ.get("SUBSPACE_REG_ENABLED", "1")))
+    subspace_teacher_path = os.environ.get("SUBSPACE_TEACHER_PATH", "./baseline.pt")
+    subspace_rank = int(os.environ.get("SUBSPACE_RANK", 128))
+    subspace_attention = bool(int(os.environ.get("SUBSPACE_ATTENTION", "1")))
+    subspace_mlp = bool(int(os.environ.get("SUBSPACE_MLP", "1")))
+    subspace_lambda = float(os.environ.get("SUBSPACE_LAMBDA", 1e-4))
+    subspace_left_weight = float(os.environ.get("SUBSPACE_LEFT_WEIGHT", 1.0))
+    subspace_right_weight = float(os.environ.get("SUBSPACE_RIGHT_WEIGHT", 1.0))
+    subspace_warmup_steps = int(os.environ.get("SUBSPACE_WARMUP_STEPS", 200))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -528,6 +532,113 @@ def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
                 param.data = param.data.float()
 
 
+SUBSPACE_ATTENTION_SUFFIXES = (
+    "attn.c_q.weight",
+    "attn.c_k.weight",
+    "attn.c_v.weight",
+    "attn.proj.weight",
+)
+SUBSPACE_MLP_SUFFIXES = (
+    "mlp.fc.weight",
+    "mlp.proj.weight",
+)
+
+
+def normalize_state_dict_keys(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
+    normalized: dict[str, Tensor] = {}
+    for key, value in state_dict.items():
+        new_key = key
+        for prefix in ("module.", "_orig_mod."):
+            if new_key.startswith(prefix):
+                new_key = new_key[len(prefix) :]
+        normalized[new_key] = value
+    return normalized
+
+
+def load_teacher_state_dict(path: str) -> dict[str, Tensor]:
+    obj = torch.load(path, map_location="cpu")
+    if isinstance(obj, dict):
+        if all(isinstance(v, Tensor) for v in obj.values()):
+            return normalize_state_dict_keys(obj)
+        for key in ("state_dict", "model", "model_state_dict"):
+            candidate = obj.get(key)
+            if isinstance(candidate, dict) and all(isinstance(v, Tensor) for v in candidate.values()):
+                return normalize_state_dict_keys(candidate)
+    raise ValueError(f"Could not find a tensor state_dict in teacher checkpoint: {path}")
+
+
+def is_subspace_target_param(name: str, include_attention: bool, include_mlp: bool) -> bool:
+    if include_attention and name.endswith(SUBSPACE_ATTENTION_SUFFIXES):
+        return True
+    if include_mlp and name.endswith(SUBSPACE_MLP_SUFFIXES):
+        return True
+    return False
+
+
+def extract_teacher_principal_subspaces(
+    model: nn.Module,
+    teacher_path: str,
+    rank: int,
+    include_attention: bool = True,
+    include_mlp: bool = True,
+) -> tuple[dict[str, tuple[Tensor, Tensor]], list[str]]:
+    teacher_state = load_teacher_state_dict(teacher_path)
+    subspaces: dict[str, tuple[Tensor, Tensor]] = {}
+    target_names: list[str] = []
+    for name, param in model.named_parameters():
+        if param.ndim != 2 or not is_subspace_target_param(name, include_attention, include_mlp):
+            continue
+        if name not in teacher_state:
+            raise KeyError(f"Missing teacher parameter for subspace regularization: {name}")
+        teacher_weight = teacher_state[name]
+        if teacher_weight.shape != param.shape:
+            raise ValueError(
+                f"Shape mismatch for subspace regularization on {name}: teacher {tuple(teacher_weight.shape)} vs student {tuple(param.shape)}"
+            )
+        teacher_weight32 = teacher_weight.detach().float().contiguous()
+        U, S, Vh = torch.linalg.svd(teacher_weight32, full_matrices=False)
+        r = min(rank, S.numel())
+        subspaces[name] = (
+            U[:, :r].contiguous().to(device=param.device, dtype=torch.float32),
+            Vh[:r, :].T.contiguous().to(device=param.device, dtype=torch.float32),
+        )
+        target_names.append(name)
+    if not target_names:
+        raise ValueError("No target parameters selected for teacher-subspace regularization")
+    return subspaces, target_names
+
+
+def compute_teacher_subspace_loss(
+    regularized_params: list[tuple[str, nn.Parameter]],
+    teacher_subspaces: dict[str, tuple[Tensor, Tensor]],
+    left_weight: float = 1.0,
+    right_weight: float = 1.0,
+) -> tuple[Tensor, Tensor, Tensor]:
+    if not regularized_params:
+        zero = torch.zeros((), dtype=torch.float32)
+        return zero, zero, zero
+    device = regularized_params[0][1].device
+    left_total = torch.zeros((), device=device, dtype=torch.float32)
+    right_total = torch.zeros((), device=device, dtype=torch.float32)
+    for name, param in regularized_params:
+        U, V = teacher_subspaces[name]
+        W = param.float()
+        left_resid = W - U @ (U.T @ W)
+        right_resid = W - (W @ V) @ V.T
+        left_total = left_total + left_resid.square().mean()
+        right_total = right_total + right_resid.square().mean()
+    left_total = left_total / len(regularized_params)
+    right_total = right_total / len(regularized_params)
+    total = left_weight * left_total + right_weight * right_total
+    return total, left_total, right_total
+
+
+def subspace_reg_multiplier(step: int, warmup_steps: int) -> float:
+    if warmup_steps <= 0:
+        return 1.0
+    return min((step + 1) / warmup_steps, 1.0)
+
+
 class Rotary(nn.Module):
     # Caches cos/sin tables per sequence length on the current device.
     def __init__(self, dim: int, base: float = 10000.0):
@@ -730,169 +841,6 @@ class GPT(nn.Module):
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
         return F.cross_entropy(logits.float(), targets, reduction="mean")
 
-    def forward_with_deltas(
-        self,
-        input_ids: Tensor,
-        target_ids: Tensor | None = None,
-        capture_layers: set[int] | None = None,
-    ) -> dict[str, Tensor | dict[int, Tensor]]:
-        """
-        Forward pass that returns:
-        - optional CE loss
-        - selected layer deltas
-
-        Delta means:
-            delta_l = h_after_block_l - h_before_block_l
-
-        For decoder layers, the skip connection is applied before defining the block delta.
-        So delta measures the transform done by the transformer block after skip injection.
-        """
-        if capture_layers is None:
-            capture_layers = set()
-
-        deltas: dict[int, Tensor] = {}
-
-        x = self.tok_emb(input_ids)
-        x = F.rms_norm(x, (x.size(-1),))
-        x0 = x
-        skips: list[Tensor] = []
-
-        # Encoder half.
-        for i in range(self.num_encoder_layers):
-            x_before = x
-            x = self.blocks[i](x, x0)
-
-            if i in capture_layers:
-                deltas[i] = x - x_before
-
-            skips.append(x)
-
-        # Decoder half.
-        for j in range(self.num_decoder_layers):
-            layer_idx = self.num_encoder_layers + j
-
-            if skips:
-                x = x + self.skip_weights[j].to(dtype=x.dtype)[None, None, :] * skips.pop()
-
-            x_before = x
-            x = self.blocks[layer_idx](x, x0)
-
-            if layer_idx in capture_layers:
-                deltas[layer_idx] = x - x_before
-
-        out: dict[str, Tensor | dict[int, Tensor]] = {
-            "deltas": deltas,
-        }
-
-        if target_ids is not None:
-            x = self.final_norm(x)
-
-            bsz, seqlen, dim = x.shape
-            x_flat = x.reshape(-1, dim)
-
-            if self.tie_embeddings:
-                logits_proj = F.linear(x_flat, self.tok_emb.weight)
-            else:
-                if self.lm_head is None:
-                    raise RuntimeError("lm_head is required when tie_embeddings=False")
-                logits_proj = self.lm_head(x_flat)
-
-            logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-            logits = logits.reshape(bsz, seqlen, -1)
-            ce_loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
-                target_ids.reshape(-1),
-                reduction="mean",
-            )
-            out["ce_loss"] = ce_loss
-
-        return out
-
-
-
-def delta_distill_losses(
-    student_deltas: dict[int, Tensor],
-    teacher_deltas: dict[int, Tensor],
-    layer_pairs: list[tuple[int, int]],
-    compute_magnitude: bool,
-    eps: float = 1e-6,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """
-    Returns:
-      direction_loss:
-          1 - cosine similarity between student and teacher update directions
-
-      magnitude_loss:
-          log-norm MSE between student and teacher update sizes
-
-      student_norm_mean:
-          mean norm of student deltas
-
-      teacher_norm_mean:
-          mean norm of teacher deltas
-    """
-    if not layer_pairs:
-        device = next(iter(student_deltas.values())).device
-        zero = torch.zeros((), device=device)
-        return zero, zero, zero, zero
-
-    dir_losses: list[Tensor] = []
-    mag_losses: list[Tensor] = []
-    student_norms: list[Tensor] = []
-    teacher_norms: list[Tensor] = []
-
-    for student_layer, teacher_layer in layer_pairs:
-        delta_s = student_deltas[student_layer].float()
-        delta_t = teacher_deltas[teacher_layer].float()
-
-        dir_loss = 1.0 - F.cosine_similarity(
-            delta_s,
-            delta_t,
-            dim=-1,
-            eps=eps,
-        ).mean()
-
-        dir_losses.append(dir_loss)
-
-        norm_s = delta_s.norm(dim=-1).clamp_min(eps)
-        norm_t = delta_t.norm(dim=-1).clamp_min(eps)
-
-        student_norms.append(norm_s.mean())
-        teacher_norms.append(norm_t.mean())
-
-        if compute_magnitude:
-            mag_loss = F.mse_loss(torch.log(norm_s), torch.log(norm_t))
-            mag_losses.append(mag_loss)
-
-    direction_loss = torch.stack(dir_losses).mean()
-
-    if compute_magnitude:
-        magnitude_loss = torch.stack(mag_losses).mean()
-    else:
-        magnitude_loss = torch.zeros((), device=direction_loss.device)
-
-    student_norm_mean = torch.stack(student_norms).mean()
-    teacher_norm_mean = torch.stack(teacher_norms).mean()
-
-    return direction_loss, magnitude_loss, student_norm_mean, teacher_norm_mean
-
-
-def parse_layer_pairs(spec: str) -> list[tuple[int, int]]:
-    """
-    Parses "2:2,5:5,8:8" into [(2, 2), (5, 5), (8, 8)].
-
-    Format:
-        student_layer:teacher_layer
-    """
-    pairs: list[tuple[int, int]] = []
-    if not spec.strip():
-        return pairs
-
-    for item in spec.split(","):
-        left, right = item.split(":")
-        pairs.append((int(left), int(right)))
-
-    return pairs
 
 # -----------------------------
 # TRAINING
@@ -940,9 +888,8 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        logdir = Path(__file__).resolve().parent / "logs"
-        logdir.mkdir(exist_ok=True)
-        logfile = logdir / f"{args.run_id}.txt"
+        os.makedirs("logs", exist_ok=True)
+        logfile = f"logs/{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
@@ -1011,54 +958,21 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
+    teacher_subspaces: dict[str, tuple[Tensor, Tensor]] = {}
+    regularized_params: list[tuple[str, nn.Parameter]] = []
+    subspace_target_names: list[str] = []
+    if args.subspace_reg_enabled:
+        teacher_subspaces, subspace_target_names = extract_teacher_principal_subspaces(
+            base_model,
+            teacher_path=args.subspace_teacher_path,
+            rank=args.subspace_rank,
+            include_attention=args.subspace_attention,
+            include_mlp=args.subspace_mlp,
+        )
+        named_params = dict(base_model.named_parameters())
+        regularized_params = [(name, named_params[name]) for name in subspace_target_names]
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
-
-    teacher_model: GPT | None = None
-
-    layer_pairs = parse_layer_pairs(args.distill_layer_pairs)
-    student_capture_layers = {s for s, _ in layer_pairs}
-    teacher_capture_layers = {t for _, t in layer_pairs}
-
-    if args.teacher_path:
-        teacher_model = GPT(
-            vocab_size=args.vocab_size,
-            num_layers=args.num_layers,
-            model_dim=args.model_dim,
-            num_heads=args.num_heads,
-            num_kv_heads=args.num_kv_heads,
-            mlp_mult=args.mlp_mult,
-            tie_embeddings=args.tie_embeddings,
-            tied_embed_init_std=args.tied_embed_init_std,
-            logit_softcap=args.logit_softcap,
-            rope_base=args.rope_base,
-            qk_gain_init=args.qk_gain_init,
-        ).to(device).bfloat16()
-
-        for module in teacher_model.modules():
-            if isinstance(module, CastedLinear):
-                module.float()
-
-        restore_low_dim_params_to_fp32(teacher_model)
-
-        if args.teacher_path.endswith(".ptz"):
-            with open(args.teacher_path, "rb") as f:
-                quant_blob = f.read()
-            quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob)), map_location="cpu")
-            teacher_state = dequantize_state_dict_int8(quant_state)
-        else:
-            teacher_state = torch.load(args.teacher_path, map_location="cpu")
-
-        teacher_model.load_state_dict(teacher_state, strict=True)
-        teacher_model.eval()
-
-        for p in teacher_model.parameters():
-            p.requires_grad_(False)
-
-        log0(f"teacher_loaded:{args.teacher_path}")
-        log0(f"distill_layer_pairs:{layer_pairs}")
-
-
 
     # Optimizer split:
     # - token embedding (Adam) uses EMBED_LR
@@ -1125,6 +1039,17 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
+    if args.subspace_reg_enabled:
+        log0(
+            f"subspace_reg:enabled path:{args.subspace_teacher_path} rank:{args.subspace_rank} "
+            f"lambda:{args.subspace_lambda:.2e} left_weight:{args.subspace_left_weight:.2f} "
+            f"right_weight:{args.subspace_right_weight:.2f} warmup_steps:{args.subspace_warmup_steps} "
+            f"attention:{args.subspace_attention} mlp:{args.subspace_mlp} tensors:{len(subspace_target_names)}"
+        )
+        for name in subspace_target_names:
+            log0(f"subspace_reg_tensor:{name}", console=False)
+    else:
+        log0("subspace_reg:disabled")
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1162,7 +1087,18 @@ def main() -> None:
                     model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
                 x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                    warmup_loss = model(x, y)
+                    warmup_ce_loss = model(x, y)
+                if args.subspace_reg_enabled:
+                    warmup_reg_scale = args.subspace_lambda * subspace_reg_multiplier(warmup_step, args.subspace_warmup_steps)
+                    warmup_subspace_loss, _, _ = compute_teacher_subspace_loss(
+                        regularized_params,
+                        teacher_subspaces,
+                        left_weight=args.subspace_left_weight,
+                        right_weight=args.subspace_right_weight,
+                    )
+                    warmup_loss = warmup_ce_loss + warmup_reg_scale * warmup_subspace_loss
+                else:
+                    warmup_loss = warmup_ce_loss
                 (warmup_loss * grad_scale).backward()
             for opt in optimizers:
                 opt.step()
@@ -1223,85 +1159,44 @@ def main() -> None:
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
+        reg_scale = (
+            args.subspace_lambda * subspace_reg_multiplier(step, args.subspace_warmup_steps)
+            if args.subspace_reg_enabled
+            else 0.0
+        )
         zero_grad_all()
-
         train_loss = torch.zeros((), device=device)
-        dir_loss_meter = torch.zeros((), device=device)
-        mag_loss_meter = torch.zeros((), device=device)
-        student_norm_meter = torch.zeros((), device=device)
-        teacher_norm_meter = torch.zeros((), device=device)
-
+        train_ce_loss = torch.zeros((), device=device)
+        train_subspace_loss = torch.zeros((), device=device)
+        train_subspace_left = torch.zeros((), device=device)
+        train_subspace_right = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-
-            x, y = train_loader.next_batch(
-                args.train_batch_tokens,
-                args.train_seq_len,
-                grad_accum_steps,
-            )
-
+            x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                if teacher_model is None:
-                    loss = model(x, y)
-                    ce_loss = loss
-
-                    dir_loss = torch.zeros((), device=device)
-                    mag_loss = torch.zeros((), device=device)
-                    student_norm = torch.zeros((), device=device)
-                    teacher_norm = torch.zeros((), device=device)
-
-                else:
-                    # Teacher forward: frozen, no gradients.
-                    with torch.no_grad():
-                        teacher_out = teacher_model.forward_with_deltas(
-                            x,
-                            target_ids=None,
-                            capture_layers=teacher_capture_layers,
-                        )
-
-                    # Student forward: gradients enabled.
-                    # This bypasses DDP, so use single-GPU for this experiment.
-                    student_out = base_model.forward_with_deltas(
-                        x,
-                        target_ids=y,
-                        capture_layers=student_capture_layers,
-                    )
-
-                    ce_loss = student_out["ce_loss"]
-                    student_deltas = student_out["deltas"]
-                    teacher_deltas = teacher_out["deltas"]
-
-                    assert isinstance(ce_loss, Tensor)
-                    assert isinstance(student_deltas, dict)
-                    assert isinstance(teacher_deltas, dict)
-
-                    dir_loss, mag_loss, student_norm, teacher_norm = delta_distill_losses(
-                        student_deltas,
-                        teacher_deltas,
-                        layer_pairs,
-                        compute_magnitude=args.delta_mag_lambda > 0.0,
-                    )
-
-                    loss = (
-                        ce_loss
-                        + args.delta_dir_lambda * dir_loss
-                        + args.delta_mag_lambda * mag_loss
-                    )
-
-            train_loss += ce_loss.detach()
-            dir_loss_meter += dir_loss.detach()
-            mag_loss_meter += mag_loss.detach()
-            student_norm_meter += student_norm.detach()
-            teacher_norm_meter += teacher_norm.detach()
-
+                ce_loss = model(x, y)
+            if args.subspace_reg_enabled:
+                subspace_loss, subspace_left, subspace_right = compute_teacher_subspace_loss(
+                    regularized_params,
+                    teacher_subspaces,
+                    left_weight=args.subspace_left_weight,
+                    right_weight=args.subspace_right_weight,
+                )
+                loss = ce_loss + reg_scale * subspace_loss
+                train_subspace_loss += subspace_loss.detach()
+                train_subspace_left += subspace_left.detach()
+                train_subspace_right += subspace_right.detach()
+            else:
+                loss = ce_loss
+            train_ce_loss += ce_loss.detach()
+            train_loss += loss.detach()
             (loss * grad_scale).backward()
-
         train_loss /= grad_accum_steps
-        dir_loss_meter /= grad_accum_steps
-        mag_loss_meter /= grad_accum_steps
-        student_norm_meter /= grad_accum_steps
-        teacher_norm_meter /= grad_accum_steps
+        train_ce_loss /= grad_accum_steps
+        train_subspace_loss /= grad_accum_steps
+        train_subspace_left /= grad_accum_steps
+        train_subspace_right /= grad_accum_steps
 
         frac = min(step / args.muon_momentum_warmup_steps, 1.0) if args.muon_momentum_warmup_steps > 0 else 1.0
         muon_momentum = (1 - frac) * args.muon_momentum_warmup_start + frac * args.muon_momentum
@@ -1325,23 +1220,18 @@ def main() -> None:
             and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None)
         )
         if should_log_train:
-            if teacher_model is None:
+            if args.subspace_reg_enabled:
                 log0(
                     f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
+                    f"ce_loss:{train_ce_loss.item():.4f} subspace_loss:{train_subspace_loss.item():.6f} "
+                    f"subspace_left:{train_subspace_left.item():.6f} subspace_right:{train_subspace_right.item():.6f} "
+                    f"subspace_lambda:{reg_scale:.2e} train_time:{approx_training_time_ms:.0f}ms "
+                    f"step_avg:{approx_training_time_ms / step:.2f}ms"
                 )
             else:
                 log0(
-                    f"step:{step}/{args.iterations} "
-                    f"ce_loss:{train_loss.item():.4f} "
-                    f"delta_dir:{dir_loss_meter.item():.4f} "
-                    f"delta_mag:{mag_loss_meter.item():.4f} "
-                    f"avg_cos:{1.0 - dir_loss_meter.item():.4f} "
-                    f"student_norm:{student_norm_meter.item():.4f} "
-                    f"teacher_norm:{teacher_norm_meter.item():.4f} "
-                    f"norm_ratio:{student_norm_meter.item() / max(teacher_norm_meter.item(), 1e-8):.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms "
-                    f"step_avg:{approx_training_time_ms / step:.2f}ms"
+                    f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
+                    f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
                 )
 
         # Needed to sync whether we've reached the wallclock cap.
@@ -1365,8 +1255,8 @@ def main() -> None:
     # the compressed int8+zlib artifact and validate the round-tripped weights.
 
     if master_process:
-        torch.save(base_model.state_dict(), "teacher_directional.pt")
-        model_bytes = os.path.getsize("teacher_directional.pt")
+        torch.save(base_model.state_dict(), "subspace_reg.pt")
+        model_bytes = os.path.getsize("subspace_reg.pt")
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
@@ -1379,9 +1269,9 @@ def main() -> None:
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("teacher_directional.int8.ptz", "wb") as f:
+        with open("subspace_reg.int8.ptz", "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("teacher_directional.int8.ptz")
+        quant_file_bytes = os.path.getsize("subspace_reg.int8.ptz")
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
@@ -1392,7 +1282,7 @@ def main() -> None:
 
     if distributed:
         dist.barrier()
-    with open("teacher_directional.int8.ptz", "rb") as f:
+    with open("subspace_reg.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
@@ -1423,3 +1313,175 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+====================================================================================================
+Running Python 3.12.3 (main, Nov  6 2025, 13:44:16) [GCC 13.3.0]
+Running PyTorch 2.9.1+cu128
+Fri Apr 17 20:52:00 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 575.57.08              Driver Version: 575.57.08      CUDA Version: 12.9     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:18:00.0 Off |                    0 |
+| N/A   24C    P0            113W /  700W |    1519MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100 80GB HBM3          On  |   00000000:2A:00.0 Off |                    0 |
+| N/A   27C    P0            116W /  700W |    1519MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100 80GB HBM3          On  |   00000000:3A:00.0 Off |                    0 |
+| N/A   28C    P0            118W /  700W |    1519MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100 80GB HBM3          On  |   00000000:5D:00.0 Off |                    0 |
+| N/A   24C    P0            111W /  700W |    1519MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   4  NVIDIA H100 80GB HBM3          On  |   00000000:9A:00.0 Off |                    0 |
+| N/A   24C    P0            117W /  700W |    1519MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   5  NVIDIA H100 80GB HBM3          On  |   00000000:AB:00.0 Off |                    0 |
+| N/A   28C    P0            115W /  700W |    1519MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   6  NVIDIA H100 80GB HBM3          On  |   00000000:BA:00.0 Off |                    0 |
+| N/A   26C    P0            116W /  700W |    1519MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   7  NVIDIA H100 80GB HBM3          On  |   00000000:DB:00.0 Off |                    0 |
+| N/A   24C    P0            112W /  700W |    1519MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A          177948      C   /usr/local/bin/python                  1510MiB |
+|    1   N/A  N/A          177949      C   /usr/local/bin/python                  1510MiB |
+|    2   N/A  N/A          177950      C   /usr/local/bin/python                  1510MiB |
+|    3   N/A  N/A          177951      C   /usr/local/bin/python                  1510MiB |
+|    4   N/A  N/A          177952      C   /usr/local/bin/python                  1510MiB |
+|    5   N/A  N/A          177953      C   /usr/local/bin/python                  1510MiB |
+|    6   N/A  N/A          177954      C   /usr/local/bin/python                  1510MiB |
+|    7   N/A  N/A          177955      C   /usr/local/bin/python                  1510MiB |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:80
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+model_params:17059912
+world_size:8 grad_accum_steps:1
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+train_batch_tokens:524288 train_seq_len:1024 iterations:20000 warmup_steps:20 max_wallclock_seconds:600.000
+seed:1337
+subspace_reg:enabled path:./baseline.pt rank:128 lambda:1.00e-03 left_weight:1.00 right_weight:1.00 warmup_steps:200 attention:True mlp:True tensors:54
+subspace_reg_tensor:blocks.0.attn.c_q.weight
+subspace_reg_tensor:blocks.0.attn.c_k.weight
+subspace_reg_tensor:blocks.0.attn.c_v.weight
+subspace_reg_tensor:blocks.0.attn.proj.weight
+subspace_reg_tensor:blocks.0.mlp.fc.weight
+subspace_reg_tensor:blocks.0.mlp.proj.weight
+subspace_reg_tensor:blocks.1.attn.c_q.weight
+subspace_reg_tensor:blocks.1.attn.c_k.weight
+subspace_reg_tensor:blocks.1.attn.c_v.weight
+subspace_reg_tensor:blocks.1.attn.proj.weight
+subspace_reg_tensor:blocks.1.mlp.fc.weight
+subspace_reg_tensor:blocks.1.mlp.proj.weight
+subspace_reg_tensor:blocks.2.attn.c_q.weight
+subspace_reg_tensor:blocks.2.attn.c_k.weight
+subspace_reg_tensor:blocks.2.attn.c_v.weight
+subspace_reg_tensor:blocks.2.attn.proj.weight
+subspace_reg_tensor:blocks.2.mlp.fc.weight
+subspace_reg_tensor:blocks.2.mlp.proj.weight
+subspace_reg_tensor:blocks.3.attn.c_q.weight
+subspace_reg_tensor:blocks.3.attn.c_k.weight
+subspace_reg_tensor:blocks.3.attn.c_v.weight
+subspace_reg_tensor:blocks.3.attn.proj.weight
+subspace_reg_tensor:blocks.3.mlp.fc.weight
+subspace_reg_tensor:blocks.3.mlp.proj.weight
+subspace_reg_tensor:blocks.4.attn.c_q.weight
+subspace_reg_tensor:blocks.4.attn.c_k.weight
+subspace_reg_tensor:blocks.4.attn.c_v.weight
+subspace_reg_tensor:blocks.4.attn.proj.weight
+subspace_reg_tensor:blocks.4.mlp.fc.weight
+subspace_reg_tensor:blocks.4.mlp.proj.weight
+subspace_reg_tensor:blocks.5.attn.c_q.weight
+subspace_reg_tensor:blocks.5.attn.c_k.weight
+subspace_reg_tensor:blocks.5.attn.c_v.weight
+subspace_reg_tensor:blocks.5.attn.proj.weight
+subspace_reg_tensor:blocks.5.mlp.fc.weight
+subspace_reg_tensor:blocks.5.mlp.proj.weight
+subspace_reg_tensor:blocks.6.attn.c_q.weight
+subspace_reg_tensor:blocks.6.attn.c_k.weight
+subspace_reg_tensor:blocks.6.attn.c_v.weight
+subspace_reg_tensor:blocks.6.attn.proj.weight
+subspace_reg_tensor:blocks.6.mlp.fc.weight
+subspace_reg_tensor:blocks.6.mlp.proj.weight
+subspace_reg_tensor:blocks.7.attn.c_q.weight
+subspace_reg_tensor:blocks.7.attn.c_k.weight
+subspace_reg_tensor:blocks.7.attn.c_v.weight
+subspace_reg_tensor:blocks.7.attn.proj.weight
+subspace_reg_tensor:blocks.7.mlp.fc.weight
+subspace_reg_tensor:blocks.7.mlp.proj.weight
+subspace_reg_tensor:blocks.8.attn.c_q.weight
+subspace_reg_tensor:blocks.8.attn.c_k.weight
+subspace_reg_tensor:blocks.8.attn.c_v.weight
+subspace_reg_tensor:blocks.8.attn.proj.weight
+subspace_reg_tensor:blocks.8.mlp.fc.weight
+subspace_reg_tensor:blocks.8.mlp.proj.weight
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/20000 val_loss:6.9357 val_bpb:4.1077 train_time:0ms step_avg:0.01ms
+step:1/20000 train_loss:6.9370 ce_loss:6.9370 subspace_loss:0.000606 subspace_left:0.000282 subspace_right:0.000324 subspace_lambda:5.00e-06 train_time:33ms step_avg:33.01ms
+step:2/20000 train_loss:16.8366 ce_loss:16.8366 subspace_loss:0.000606 subspace_left:0.000282 subspace_right:0.000324 subspace_lambda:1.00e-05 train_time:87ms step_avg:43.49ms
+step:3/20000 train_loss:8.7612 ce_loss:8.7612 subspace_loss:0.000616 subspace_left:0.000287 subspace_right:0.000329 subspace_lambda:1.50e-05 train_time:142ms step_avg:47.36ms
+step:4/20000 train_loss:6.6384 ce_loss:6.6384 subspace_loss:0.000625 subspace_left:0.000292 subspace_right:0.000334 subspace_lambda:2.00e-05 train_time:198ms step_avg:49.45ms
+step:5/20000 train_loss:6.6118 ce_loss:6.6118 subspace_loss:0.000638 subspace_left:0.000298 subspace_right:0.000340 subspace_lambda:2.50e-05 train_time:253ms step_avg:50.69ms
+step:6/20000 train_loss:7.4218 ce_loss:7.4218 subspace_loss:0.000653 subspace_left:0.000305 subspace_right:0.000348 subspace_lambda:3.00e-05 train_time:309ms step_avg:51.51ms
+step:7/20000 train_loss:6.3507 ce_loss:6.3507 subspace_loss:0.000670 subspace_left:0.000314 subspace_right:0.000357 subspace_lambda:3.50e-05 train_time:365ms step_avg:52.10ms
+step:8/20000 train_loss:6.1576 ce_loss:6.1576 subspace_loss:0.000690 subspace_left:0.000323 subspace_right:0.000367 subspace_lambda:4.00e-05 train_time:421ms step_avg:52.58ms
+step:9/20000 train_loss:6.0678 ce_loss:6.0678 subspace_loss:0.000711 subspace_left:0.000333 subspace_right:0.000378 subspace_lambda:4.50e-05 train_time:476ms step_avg:52.94ms
+step:10/20000 train_loss:5.9748 ce_loss:5.9748 subspace_loss:0.000734 subspace_left:0.000344 subspace_right:0.000390 subspace_lambda:5.00e-05 train_time:532ms step_avg:53.20ms
+step:200/20000 train_loss:2.8498 ce_loss:2.8498 subspace_loss:0.005710 subspace_left:0.002654 subspace_right:0.003056 subspace_lambda:1.00e-03 train_time:10258ms step_avg:51.29ms
+step:400/20000 train_loss:2.3600 ce_loss:2.3600 subspace_loss:0.015297 subspace_left:0.007109 subspace_right:0.008187 subspace_lambda:1.00e-03 train_time:20481ms step_avg:51.20ms
+step:600/20000 train_loss:2.5516 ce_loss:2.5516 subspace_loss:0.030792 subspace_left:0.014303 subspace_right:0.016489 subspace_lambda:1.00e-03 train_time:30706ms step_avg:51.18ms
+step:800/20000 train_loss:2.2980 ce_loss:2.2979 subspace_loss:0.048240 subspace_left:0.022388 subspace_right:0.025852 subspace_lambda:1.00e-03 train_time:40920ms step_avg:51.15ms
+step:1000/20000 train_loss:2.3739 ce_loss:2.3738 subspace_loss:0.065653 subspace_left:0.030448 subspace_right:0.035205 subspace_lambda:1.00e-03 train_time:51131ms step_avg:51.13ms
+step:1000/20000 val_loss:2.3343 val_bpb:1.3825 train_time:51157ms step_avg:51.16ms
+step:1200/20000 train_loss:2.3876 ce_loss:2.3876 subspace_loss:0.083077 subspace_left:0.038512 subspace_right:0.044564 subspace_lambda:1.00e-03 train_time:61360ms step_avg:51.13ms
+step:1400/20000 train_loss:2.4331 ce_loss:2.4330 subspace_loss:0.100358 subspace_left:0.046494 subspace_right:0.053864 subspace_lambda:1.00e-03 train_time:71573ms step_avg:51.12ms
+step:1600/20000 train_loss:2.0991 ce_loss:2.0990 subspace_loss:0.117605 subspace_left:0.054459 subspace_right:0.063146 subspace_lambda:1.00e-03 train_time:81791ms step_avg:51.12ms
+step:1800/20000 train_loss:2.2002 ce_loss:2.2001 subspace_loss:0.134885 subspace_left:0.062431 subspace_right:0.072453 subspace_lambda:1.00e-03 train_time:92028ms step_avg:51.13ms
+step:2000/20000 train_loss:2.2519 ce_loss:2.2518 subspace_loss:0.152356 subspace_left:0.070490 subspace_right:0.081866 subspace_lambda:1.00e-03 train_time:102251ms step_avg:51.13ms
+step:2000/20000 val_loss:2.2370 val_bpb:1.3249 train_time:102277ms step_avg:51.14ms
+step:2200/20000 train_loss:2.0762 ce_loss:2.0760 subspace_loss:0.169815 subspace_left:0.078563 subspace_right:0.091252 subspace_lambda:1.00e-03 train_time:112481ms step_avg:51.13ms
+step:2400/20000 train_loss:2.2045 ce_loss:2.2043 subspace_loss:0.187304 subspace_left:0.086624 subspace_right:0.100680 subspace_lambda:1.00e-03 train_time:122693ms step_avg:51.12ms
+step:2600/20000 train_loss:2.4137 ce_loss:2.4135 subspace_loss:0.204700 subspace_left:0.094645 subspace_right:0.110055 subspace_lambda:1.00e-03 train_time:132908ms step_avg:51.12ms

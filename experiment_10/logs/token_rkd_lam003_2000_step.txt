@@ -1,3 +1,9 @@
+"""
+The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but competitive submissions should stay in the `/records` folder.
+
+Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `train_gpt_mlx.py` never are longer than 1500 lines.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -81,17 +87,20 @@ class Hyperparameters:
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
 
-    # -----------------------------
-    # DISTILLATION
-    # -----------------------------
-    teacher_path = os.environ.get("TEACHER_PATH", "./small_teacher.pt")
+    # Relational KD / teacher representation distillation.
+    relkd_mode = os.environ.get("RELKD_MODE", "off").lower()
+    relkd_teacher_path = os.environ.get("RELKD_TEACHER_PATH", "./baseline.pt")
+    relkd_layer = int(os.environ.get("RELKD_LAYER", "-1"))
+    relkd_lambda = float(os.environ.get("RELKD_LAMBDA", "1e-3"))
 
-    # Example: "2:2,5:5,8:8" means student layer 2 matches teacher layer 2, etc.
-    distill_layer_pairs = os.environ.get("DISTILL_LAYER_PAIRS", "8:8")
+    relkd_sample_lambda = float(os.environ.get("RELKD_SAMPLE_LAMBDA", "1.0"))
+    relkd_token_lambda = float(os.environ.get("RELKD_TOKEN_LAMBDA", "1.0"))
+    relkd_mag_lambda = float(os.environ.get("RELKD_MAG_LAMBDA", "0.1"))
+    relkd_pool = os.environ.get("RELKD_POOL", "mean").lower()
 
-    # First experiment: set DELTA_MAG_LAMBDA=0.0
-    delta_dir_lambda = float(os.environ.get("DELTA_DIR_LAMBDA", 0.01))
-    delta_mag_lambda = float(os.environ.get("DELTA_MAG_LAMBDA", 0.0))
+    # Keeps [batch, seq, seq] token geometry loss from exploding memory.
+    relkd_token_stride = int(os.environ.get("RELKD_TOKEN_STRIDE", "1"))
+    relkd_max_tokens = int(os.environ.get("RELKD_MAX_TOKENS", "0"))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -704,21 +713,37 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
-    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+    def forward(
+        self,
+        input_ids: Tensor,
+        target_ids: Tensor,
+        return_hidden: bool = False,
+        hidden_layer: int = -1,
+    ) -> Tensor | tuple[Tensor, Tensor]:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
+        selected_hidden: Tensor | None = None
+        layer_idx = 0
 
         # First half stores skips; second half reuses them in reverse order.
         for i in range(self.num_encoder_layers):
             x = self.blocks[i](x, x0)
+            if hidden_layer == layer_idx:
+                selected_hidden = x
             skips.append(x)
+            layer_idx += 1
         for i in range(self.num_decoder_layers):
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             x = self.blocks[self.num_encoder_layers + i](x, x0)
+            if hidden_layer == layer_idx:
+                selected_hidden = x
+            layer_idx += 1
 
+        if selected_hidden is None:
+            selected_hidden = x
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
         if self.tie_embeddings:
@@ -728,171 +753,158 @@ class GPT(nn.Module):
                 raise RuntimeError("lm_head is required when tie_embeddings=False")
             logits_proj = self.lm_head(x)
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-        return F.cross_entropy(logits.float(), targets, reduction="mean")
+        ce_loss = F.cross_entropy(logits.float(), targets, reduction="mean")
+        if return_hidden:
+            return ce_loss, selected_hidden
+        return ce_loss
 
-    def forward_with_deltas(
+
+    def forward_hidden(
         self,
         input_ids: Tensor,
-        target_ids: Tensor | None = None,
-        capture_layers: set[int] | None = None,
-    ) -> dict[str, Tensor | dict[int, Tensor]]:
+        hidden_layer: int = -1,
+    ) -> Tensor:
         """
-        Forward pass that returns:
-        - optional CE loss
-        - selected layer deltas
+        Return selected hidden state without computing logits or CE loss.
 
-        Delta means:
-            delta_l = h_after_block_l - h_before_block_l
-
-        For decoder layers, the skip connection is applied before defining the block delta.
-        So delta measures the transform done by the transformer block after skip injection.
+        Used for teacher-side relational KD, where we only need teacher geometry.
         """
-        if capture_layers is None:
-            capture_layers = set()
-
-        deltas: dict[int, Tensor] = {}
-
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
+        selected_hidden: Tensor | None = None
+        layer_idx = 0
 
-        # Encoder half.
+        # First half stores skips.
         for i in range(self.num_encoder_layers):
-            x_before = x
             x = self.blocks[i](x, x0)
-
-            if i in capture_layers:
-                deltas[i] = x - x_before
-
+            if hidden_layer == layer_idx:
+                selected_hidden = x
             skips.append(x)
+            layer_idx += 1
 
-        # Decoder half.
-        for j in range(self.num_decoder_layers):
-            layer_idx = self.num_encoder_layers + j
-
+        # Second half reuses skips in reverse order.
+        for i in range(self.num_decoder_layers):
             if skips:
-                x = x + self.skip_weights[j].to(dtype=x.dtype)[None, None, :] * skips.pop()
+                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
 
-            x_before = x
-            x = self.blocks[layer_idx](x, x0)
+            x = self.blocks[self.num_encoder_layers + i](x, x0)
 
-            if layer_idx in capture_layers:
-                deltas[layer_idx] = x - x_before
+            if hidden_layer == layer_idx:
+                selected_hidden = x
+            layer_idx += 1
 
-        out: dict[str, Tensor | dict[int, Tensor]] = {
-            "deltas": deltas,
-        }
+        if selected_hidden is None:
+            selected_hidden = x
 
-        if target_ids is not None:
-            x = self.final_norm(x)
+        return selected_hidden
 
-            bsz, seqlen, dim = x.shape
-            x_flat = x.reshape(-1, dim)
+# -----------------------------
+# RELATIONAL KD LOSSES
+# -----------------------------
 
-            if self.tie_embeddings:
-                logits_proj = F.linear(x_flat, self.tok_emb.weight)
-            else:
-                if self.lm_head is None:
-                    raise RuntimeError("lm_head is required when tie_embeddings=False")
-                logits_proj = self.lm_head(x_flat)
-
-            logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-            logits = logits.reshape(bsz, seqlen, -1)
-            ce_loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
-                target_ids.reshape(-1),
-                reduction="mean",
-            )
-            out["ce_loss"] = ce_loss
-
-        return out
+def _pool_sequence(h: Tensor, mode: str = "mean") -> Tensor:
+    # h: [batch, seq, hidden] -> [batch, hidden]
+    if mode == "last":
+        return h[:, -1, :]
+    if mode == "first":
+        return h[:, 0, :]
+    return h.mean(dim=1)
 
 
+def sample_rkd_loss(h_s: Tensor, h_t: Tensor, pool: str = "mean") -> Tensor:
+    # Classic sample-level relational KD:
+    # compare sample-to-sample geometry in the current batch.
+    z_s = _pool_sequence(h_s.float(), pool)
+    z_t = _pool_sequence(h_t.float(), pool)
+    z_s = F.normalize(z_s, dim=-1)
+    z_t = F.normalize(z_t, dim=-1)
+    sim_s = z_s @ z_s.T              # [batch, batch]
+    sim_t = z_t @ z_t.T              # [batch, batch]
+    return F.mse_loss(sim_s, sim_t)
 
-def delta_distill_losses(
-    student_deltas: dict[int, Tensor],
-    teacher_deltas: dict[int, Tensor],
-    layer_pairs: list[tuple[int, int]],
-    compute_magnitude: bool,
-    eps: float = 1e-6,
+
+def relative_magnitude_matrix(h: Tensor, eps: float = 1e-8) -> Tensor:
+    # h: [batch, seq, hidden] -> [batch, seq, seq]
+    lognorm = torch.log(h.float().norm(dim=-1).clamp_min(eps))
+    return lognorm.unsqueeze(-1) - lognorm.unsqueeze(-2)
+
+
+def token_geometry_loss(
+    h_s: Tensor,
+    h_t: Tensor,
+    mag_lambda: float = 0.1,
+    token_stride: int = 1,
+    max_tokens: int = 0,
+) -> tuple[Tensor, Tensor, Tensor]:
+    # Your token-level relational KD:
+    # compare token-to-token geometry inside each sequence.
+    #
+    # h_s, h_t: [batch, seq, hidden]
+    h_s_f = h_s.float()
+    h_t_f = h_t.float()
+
+    # Cheap deterministic token subsampling to reduce [seq, seq] memory.
+    if token_stride > 1:
+        h_s_f = h_s_f[:, ::token_stride, :]
+        h_t_f = h_t_f[:, ::token_stride, :]
+
+    if max_tokens > 0 and h_s_f.size(1) > max_tokens:
+        idx = torch.linspace(
+            0,
+            h_s_f.size(1) - 1,
+            steps=max_tokens,
+            device=h_s_f.device,
+        ).long()
+        h_s_f = h_s_f.index_select(1, idx)
+        h_t_f = h_t_f.index_select(1, idx)
+
+    s_norm = F.normalize(h_s_f, dim=-1)
+    t_norm = F.normalize(h_t_f, dim=-1)
+
+    sim_s = s_norm @ s_norm.transpose(-1, -2)  # [batch, token_subset, token_subset]
+    sim_t = t_norm @ t_norm.transpose(-1, -2)
+
+    sim_loss = F.mse_loss(sim_s, sim_t)
+
+    mag_s = relative_magnitude_matrix(h_s_f)
+    mag_t = relative_magnitude_matrix(h_t_f)
+    mag_loss = F.mse_loss(mag_s, mag_t)
+
+    return sim_loss + mag_lambda * mag_loss, sim_loss, mag_loss
+
+
+def relational_kd_loss(
+    h_s: Tensor,
+    h_t: Tensor,
+    mode: str,
+    sample_lambda: float,
+    token_lambda: float,
+    mag_lambda: float,
+    pool: str,
+    token_stride: int,
+    max_tokens: int,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """
-    Returns:
-      direction_loss:
-          1 - cosine similarity between student and teacher update directions
-
-      magnitude_loss:
-          log-norm MSE between student and teacher update sizes
-
-      student_norm_mean:
-          mean norm of student deltas
-
-      teacher_norm_mean:
-          mean norm of teacher deltas
-    """
-    if not layer_pairs:
-        device = next(iter(student_deltas.values())).device
-        zero = torch.zeros((), device=device)
-        return zero, zero, zero, zero
-
-    dir_losses: list[Tensor] = []
-    mag_losses: list[Tensor] = []
-    student_norms: list[Tensor] = []
-    teacher_norms: list[Tensor] = []
-
-    for student_layer, teacher_layer in layer_pairs:
-        delta_s = student_deltas[student_layer].float()
-        delta_t = teacher_deltas[teacher_layer].float()
-
-        dir_loss = 1.0 - F.cosine_similarity(
-            delta_s,
-            delta_t,
-            dim=-1,
-            eps=eps,
-        ).mean()
-
-        dir_losses.append(dir_loss)
-
-        norm_s = delta_s.norm(dim=-1).clamp_min(eps)
-        norm_t = delta_t.norm(dim=-1).clamp_min(eps)
-
-        student_norms.append(norm_s.mean())
-        teacher_norms.append(norm_t.mean())
-
-        if compute_magnitude:
-            mag_loss = F.mse_loss(torch.log(norm_s), torch.log(norm_t))
-            mag_losses.append(mag_loss)
-
-    direction_loss = torch.stack(dir_losses).mean()
-
-    if compute_magnitude:
-        magnitude_loss = torch.stack(mag_losses).mean()
-    else:
-        magnitude_loss = torch.zeros((), device=direction_loss.device)
-
-    student_norm_mean = torch.stack(student_norms).mean()
-    teacher_norm_mean = torch.stack(teacher_norms).mean()
-
-    return direction_loss, magnitude_loss, student_norm_mean, teacher_norm_mean
-
-
-def parse_layer_pairs(spec: str) -> list[tuple[int, int]]:
-    """
-    Parses "2:2,5:5,8:8" into [(2, 2), (5, 5), (8, 8)].
-
-    Format:
-        student_layer:teacher_layer
-    """
-    pairs: list[tuple[int, int]] = []
-    if not spec.strip():
-        return pairs
-
-    for item in spec.split(","):
-        left, right = item.split(":")
-        pairs.append((int(left), int(right)))
-
-    return pairs
+    zero = torch.zeros((), device=h_s.device, dtype=torch.float32)
+    sample_loss = zero
+    token_loss = zero
+    mag_loss = zero
+    total = zero
+    if mode in {"sample", "both"}:
+        sample_loss = sample_rkd_loss(h_s, h_t, pool=pool)
+        total = total + sample_lambda * sample_loss
+    if mode in {"token", "both"}:
+        token_total, token_sim, mag_loss = token_geometry_loss(
+            h_s,
+            h_t,
+            mag_lambda=mag_lambda,
+            token_stride=token_stride,
+            max_tokens=max_tokens,
+        )
+        token_loss = token_sim
+        total = total + token_lambda * token_total
+    return total, sample_loss, token_loss, mag_loss
 
 # -----------------------------
 # TRAINING
@@ -940,9 +952,8 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        logdir = Path(__file__).resolve().parent / "logs"
-        logdir.mkdir(exist_ok=True)
-        logfile = logdir / f"{args.run_id}.txt"
+        os.makedirs("logs", exist_ok=True)
+        logfile = f"logs/{args.run_id}.txt"
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
@@ -1014,13 +1025,11 @@ def main() -> None:
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
+    use_relkd = args.relkd_mode in {"sample", "token", "both"}
     teacher_model: GPT | None = None
-
-    layer_pairs = parse_layer_pairs(args.distill_layer_pairs)
-    student_capture_layers = {s for s, _ in layer_pairs}
-    teacher_capture_layers = {t for _, t in layer_pairs}
-
-    if args.teacher_path:
+    if use_relkd:
+        if not args.relkd_teacher_path:
+            raise ValueError("RELKD_TEACHER_PATH must point to a teacher state_dict when RELKD_MODE is not off")
         teacher_model = GPT(
             vocab_size=args.vocab_size,
             num_layers=args.num_layers,
@@ -1034,31 +1043,15 @@ def main() -> None:
             rope_base=args.rope_base,
             qk_gain_init=args.qk_gain_init,
         ).to(device).bfloat16()
-
+        teacher_state = torch.load(args.relkd_teacher_path, map_location=device)
+        teacher_model.load_state_dict(teacher_state, strict=True)
         for module in teacher_model.modules():
             if isinstance(module, CastedLinear):
                 module.float()
-
         restore_low_dim_params_to_fp32(teacher_model)
-
-        if args.teacher_path.endswith(".ptz"):
-            with open(args.teacher_path, "rb") as f:
-                quant_blob = f.read()
-            quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob)), map_location="cpu")
-            teacher_state = dequantize_state_dict_int8(quant_state)
-        else:
-            teacher_state = torch.load(args.teacher_path, map_location="cpu")
-
-        teacher_model.load_state_dict(teacher_state, strict=True)
         teacher_model.eval()
-
         for p in teacher_model.parameters():
             p.requires_grad_(False)
-
-        log0(f"teacher_loaded:{args.teacher_path}")
-        log0(f"distill_layer_pairs:{layer_pairs}")
-
-
 
     # Optimizer split:
     # - token embedding (Adam) uses EMBED_LR
@@ -1125,6 +1118,11 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
+    log0(
+        f"relkd_mode:{args.relkd_mode} relkd_lambda:{args.relkd_lambda} "
+        f"sample_lambda:{args.relkd_sample_lambda} token_lambda:{args.relkd_token_lambda} "
+        f"mag_lambda:{args.relkd_mag_lambda} layer:{args.relkd_layer} pool:{args.relkd_pool}"
+    )
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1224,84 +1222,60 @@ def main() -> None:
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
-
         train_loss = torch.zeros((), device=device)
-        dir_loss_meter = torch.zeros((), device=device)
-        mag_loss_meter = torch.zeros((), device=device)
-        student_norm_meter = torch.zeros((), device=device)
-        teacher_norm_meter = torch.zeros((), device=device)
-
+        ce_loss_sum = torch.zeros((), device=device)
+        kd_loss_sum = torch.zeros((), device=device)
+        sample_loss_sum = torch.zeros((), device=device)
+        token_loss_sum = torch.zeros((), device=device)
+        mag_loss_sum = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-
-            x, y = train_loader.next_batch(
-                args.train_batch_tokens,
-                args.train_seq_len,
-                grad_accum_steps,
-            )
-
+            x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                if teacher_model is None:
-                    loss = model(x, y)
-                    ce_loss = loss
+                if use_relkd:
+                    ce_loss, h_s = model(x, y, return_hidden=True, hidden_layer=args.relkd_layer)
 
-                    dir_loss = torch.zeros((), device=device)
-                    mag_loss = torch.zeros((), device=device)
-                    student_norm = torch.zeros((), device=device)
-                    teacher_norm = torch.zeros((), device=device)
+                    if teacher_model is None:
+                        raise RuntimeError("teacher_model unexpectedly missing")
 
-                else:
-                    # Teacher forward: frozen, no gradients.
                     with torch.no_grad():
-                        teacher_out = teacher_model.forward_with_deltas(
+                        h_t = teacher_model.forward_hidden(
                             x,
-                            target_ids=None,
-                            capture_layers=teacher_capture_layers,
+                            hidden_layer=args.relkd_layer,
                         )
-
-                    # Student forward: gradients enabled.
-                    # This bypasses DDP, so use single-GPU for this experiment.
-                    student_out = base_model.forward_with_deltas(
-                        x,
-                        target_ids=y,
-                        capture_layers=student_capture_layers,
+                    kd_loss, sample_loss, token_loss, mag_loss = relational_kd_loss(
+                        h_s,
+                        h_t,
+                        args.relkd_mode,
+                        args.relkd_sample_lambda,
+                        args.relkd_token_lambda,
+                        args.relkd_mag_lambda,
+                        args.relkd_pool,
+                        args.relkd_token_stride,
+                        args.relkd_max_tokens,
                     )
-
-                    ce_loss = student_out["ce_loss"]
-                    student_deltas = student_out["deltas"]
-                    teacher_deltas = teacher_out["deltas"]
-
-                    assert isinstance(ce_loss, Tensor)
-                    assert isinstance(student_deltas, dict)
-                    assert isinstance(teacher_deltas, dict)
-
-                    dir_loss, mag_loss, student_norm, teacher_norm = delta_distill_losses(
-                        student_deltas,
-                        teacher_deltas,
-                        layer_pairs,
-                        compute_magnitude=args.delta_mag_lambda > 0.0,
-                    )
-
-                    loss = (
-                        ce_loss
-                        + args.delta_dir_lambda * dir_loss
-                        + args.delta_mag_lambda * mag_loss
-                    )
-
-            train_loss += ce_loss.detach()
-            dir_loss_meter += dir_loss.detach()
-            mag_loss_meter += mag_loss.detach()
-            student_norm_meter += student_norm.detach()
-            teacher_norm_meter += teacher_norm.detach()
-
+                    loss = ce_loss + args.relkd_lambda * kd_loss
+                else:
+                    ce_loss = model(x, y)
+                    kd_loss = torch.zeros((), device=device)
+                    sample_loss = torch.zeros((), device=device)
+                    token_loss = torch.zeros((), device=device)
+                    mag_loss = torch.zeros((), device=device)
+                    loss = ce_loss
+            train_loss += loss.detach()
+            ce_loss_sum += ce_loss.detach()
+            kd_loss_sum += kd_loss.detach()
+            sample_loss_sum += sample_loss.detach()
+            token_loss_sum += token_loss.detach()
+            mag_loss_sum += mag_loss.detach()
             (loss * grad_scale).backward()
-
         train_loss /= grad_accum_steps
-        dir_loss_meter /= grad_accum_steps
-        mag_loss_meter /= grad_accum_steps
-        student_norm_meter /= grad_accum_steps
-        teacher_norm_meter /= grad_accum_steps
+        ce_loss_avg = ce_loss_sum / grad_accum_steps
+        kd_loss_avg = kd_loss_sum / grad_accum_steps
+        sample_loss_avg = sample_loss_sum / grad_accum_steps
+        token_loss_avg = token_loss_sum / grad_accum_steps
+        mag_loss_avg = mag_loss_sum / grad_accum_steps
 
         frac = min(step / args.muon_momentum_warmup_steps, 1.0) if args.muon_momentum_warmup_steps > 0 else 1.0
         muon_momentum = (1 - frac) * args.muon_momentum_warmup_start + frac * args.muon_momentum
@@ -1325,23 +1299,18 @@ def main() -> None:
             and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None)
         )
         if should_log_train:
-            if teacher_model is None:
+            if use_relkd:
                 log0(
                     f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
+                    f"ce_loss:{ce_loss_avg.item():.4f} kd_loss:{kd_loss_avg.item():.4f} "
+                    f"sample_rkd:{sample_loss_avg.item():.4f} token_sim:{token_loss_avg.item():.4f} "
+                    f"token_mag:{mag_loss_avg.item():.4f} "
                     f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
                 )
             else:
                 log0(
-                    f"step:{step}/{args.iterations} "
-                    f"ce_loss:{train_loss.item():.4f} "
-                    f"delta_dir:{dir_loss_meter.item():.4f} "
-                    f"delta_mag:{mag_loss_meter.item():.4f} "
-                    f"avg_cos:{1.0 - dir_loss_meter.item():.4f} "
-                    f"student_norm:{student_norm_meter.item():.4f} "
-                    f"teacher_norm:{teacher_norm_meter.item():.4f} "
-                    f"norm_ratio:{student_norm_meter.item() / max(teacher_norm_meter.item(), 1e-8):.4f} "
-                    f"train_time:{approx_training_time_ms:.0f}ms "
-                    f"step_avg:{approx_training_time_ms / step:.2f}ms"
+                    f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
+                    f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
                 )
 
         # Needed to sync whether we've reached the wallclock cap.
@@ -1365,8 +1334,8 @@ def main() -> None:
     # the compressed int8+zlib artifact and validate the round-tripped weights.
 
     if master_process:
-        torch.save(base_model.state_dict(), "teacher_directional.pt")
-        model_bytes = os.path.getsize("teacher_directional.pt")
+        torch.save(base_model.state_dict(), "relational_kd.pt")
+        model_bytes = os.path.getsize("relational_kd.pt")
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
@@ -1379,9 +1348,9 @@ def main() -> None:
     quant_blob = zlib.compress(quant_raw, level=9)
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("teacher_directional.int8.ptz", "wb") as f:
+        with open("relational_kd.int8.ptz", "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("teacher_directional.int8.ptz")
+        quant_file_bytes = os.path.getsize("relational_kd.int8.ptz")
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
@@ -1392,7 +1361,7 @@ def main() -> None:
 
     if distributed:
         dist.barrier()
-    with open("teacher_directional.int8.ptz", "rb") as f:
+    with open("relational_kd.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
@@ -1423,3 +1392,138 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+====================================================================================================
+Running Python 3.12.3 (main, Nov  6 2025, 13:44:16) [GCC 13.3.0]
+Running PyTorch 2.9.1+cu128
+Fri May  8 20:11:22 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.195.03             Driver Version: 570.195.03     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:18:00.0 Off |                    0 |
+| N/A   25C    P0            111W /  700W |    1465MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100 80GB HBM3          On  |   00000000:BA:00.0 Off |                    0 |
+| N/A   30C    P0            113W /  700W |    1465MiB /  81559MiB |      2%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           27928      C   /usr/local/bin/python                  1456MiB |
+|    1   N/A  N/A           27929      C   /usr/local/bin/python                  1456MiB |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:80
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+model_params:17059912
+world_size:2 grad_accum_steps:4
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+train_batch_tokens:524288 train_seq_len:1024 iterations:2000 warmup_steps:20 max_wallclock_seconds:600.000
+seed:1337
+relkd_mode:token relkd_lambda:0.003 sample_lambda:1.0 token_lambda:1.0 mag_lambda:0.0 layer:-1 pool:mean
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/2000 val_loss:6.9357 val_bpb:4.1077 train_time:0ms step_avg:0.03ms
+step:1/2000 train_loss:6.9381 ce_loss:6.9351 kd_loss:0.9947 sample_rkd:0.0000 token_sim:0.9947 token_mag:0.0692 train_time:7171ms step_avg:7171.16ms
+step:2/2000 train_loss:16.7299 ce_loss:16.7275 kd_loss:0.8010 sample_rkd:0.0000 token_sim:0.8010 token_mag:0.0724 train_time:7495ms step_avg:3747.50ms
+step:3/2000 train_loss:16.2083 ce_loss:16.2060 kd_loss:0.7623 sample_rkd:0.0000 token_sim:0.7623 token_mag:0.0735 train_time:7819ms step_avg:2606.40ms
+step:4/2000 train_loss:14.7663 ce_loss:14.7642 kd_loss:0.6842 sample_rkd:0.0000 token_sim:0.6842 token_mag:0.0700 train_time:8144ms step_avg:2035.91ms
+step:5/2000 train_loss:12.4770 ce_loss:12.4753 kd_loss:0.5480 sample_rkd:0.0000 token_sim:0.5480 token_mag:0.0756 train_time:8470ms step_avg:1694.05ms
+step:6/2000 train_loss:9.9116 ce_loss:9.9104 kd_loss:0.4040 sample_rkd:0.0000 token_sim:0.4040 token_mag:0.0851 train_time:8797ms step_avg:1466.13ms
+step:7/2000 train_loss:7.7226 ce_loss:7.7219 kd_loss:0.2300 sample_rkd:0.0000 token_sim:0.2300 token_mag:0.0854 train_time:9122ms step_avg:1303.21ms
+step:8/2000 train_loss:6.5353 ce_loss:6.5349 kd_loss:0.1292 sample_rkd:0.0000 token_sim:0.1292 token_mag:0.0879 train_time:9446ms step_avg:1180.80ms
+step:9/2000 train_loss:6.0434 ce_loss:6.0432 kd_loss:0.0665 sample_rkd:0.0000 token_sim:0.0665 token_mag:0.0875 train_time:9780ms step_avg:1086.61ms
+step:10/2000 train_loss:5.8957 ce_loss:5.8956 kd_loss:0.0332 sample_rkd:0.0000 token_sim:0.0332 token_mag:0.0853 train_time:10132ms step_avg:1013.23ms
+step:25/2000 train_loss:4.8809 ce_loss:4.8802 kd_loss:0.2344 sample_rkd:0.0000 token_sim:0.2344 token_mag:0.0890 train_time:14952ms step_avg:598.10ms
+step:50/2000 train_loss:4.0635 ce_loss:4.0624 kd_loss:0.3555 sample_rkd:0.0000 token_sim:0.3555 token_mag:0.0917 train_time:22936ms step_avg:458.73ms
+step:75/2000 train_loss:3.5149 ce_loss:3.5135 kd_loss:0.4499 sample_rkd:0.0000 token_sim:0.4499 token_mag:0.0985 train_time:30910ms step_avg:412.13ms
+step:100/2000 train_loss:3.2398 ce_loss:3.2384 kd_loss:0.4596 sample_rkd:0.0000 token_sim:0.4596 token_mag:0.0941 train_time:38887ms step_avg:388.87ms
+step:125/2000 train_loss:3.0130 ce_loss:3.0117 kd_loss:0.4432 sample_rkd:0.0000 token_sim:0.4432 token_mag:0.0900 train_time:46886ms step_avg:375.09ms
+step:150/2000 train_loss:2.9485 ce_loss:2.9473 kd_loss:0.4079 sample_rkd:0.0000 token_sim:0.4079 token_mag:0.0895 train_time:54879ms step_avg:365.86ms
+step:175/2000 train_loss:2.7601 ce_loss:2.7592 kd_loss:0.2720 sample_rkd:0.0000 token_sim:0.2720 token_mag:0.0963 train_time:62908ms step_avg:359.47ms
+step:200/2000 train_loss:2.7144 ce_loss:2.7138 kd_loss:0.1993 sample_rkd:0.0000 token_sim:0.1993 token_mag:0.0953 train_time:70934ms step_avg:354.67ms
+step:225/2000 train_loss:2.6979 ce_loss:2.6975 kd_loss:0.1447 sample_rkd:0.0000 token_sim:0.1447 token_mag:0.0989 train_time:78937ms step_avg:350.83ms
+step:250/2000 train_loss:2.6845 ce_loss:2.6842 kd_loss:0.0998 sample_rkd:0.0000 token_sim:0.0998 token_mag:0.0984 train_time:86923ms step_avg:347.69ms
+step:250/2000 val_loss:2.6627 val_bpb:1.5770 train_time:86932ms step_avg:347.73ms
+step:275/2000 train_loss:2.6262 ce_loss:2.6259 kd_loss:0.0797 sample_rkd:0.0000 token_sim:0.0797 token_mag:0.0996 train_time:94886ms step_avg:345.04ms
+step:300/2000 train_loss:2.5365 ce_loss:2.5363 kd_loss:0.0589 sample_rkd:0.0000 token_sim:0.0589 token_mag:0.0980 train_time:102858ms step_avg:342.86ms
+step:325/2000 train_loss:2.5809 ce_loss:2.5808 kd_loss:0.0455 sample_rkd:0.0000 token_sim:0.0455 token_mag:0.0936 train_time:110823ms step_avg:340.99ms
+step:350/2000 train_loss:2.5738 ce_loss:2.5737 kd_loss:0.0346 sample_rkd:0.0000 token_sim:0.0346 token_mag:0.0934 train_time:118797ms step_avg:339.42ms
+step:375/2000 train_loss:2.6142 ce_loss:2.6141 kd_loss:0.0235 sample_rkd:0.0000 token_sim:0.0235 token_mag:0.0899 train_time:126760ms step_avg:338.03ms
+step:400/2000 train_loss:2.3382 ce_loss:2.3381 kd_loss:0.0258 sample_rkd:0.0000 token_sim:0.0258 token_mag:0.0882 train_time:134763ms step_avg:336.91ms
+step:425/2000 train_loss:2.5056 ce_loss:2.5055 kd_loss:0.0219 sample_rkd:0.0000 token_sim:0.0219 token_mag:0.0877 train_time:142738ms step_avg:335.85ms
+step:450/2000 train_loss:2.4688 ce_loss:2.4687 kd_loss:0.0167 sample_rkd:0.0000 token_sim:0.0167 token_mag:0.0796 train_time:150695ms step_avg:334.88ms
+step:475/2000 train_loss:2.5090 ce_loss:2.5090 kd_loss:0.0128 sample_rkd:0.0000 token_sim:0.0128 token_mag:0.0822 train_time:158650ms step_avg:334.00ms
+step:500/2000 train_loss:2.4480 ce_loss:2.4480 kd_loss:0.0108 sample_rkd:0.0000 token_sim:0.0108 token_mag:0.0808 train_time:166606ms step_avg:333.21ms
+step:500/2000 val_loss:2.4674 val_bpb:1.4613 train_time:166613ms step_avg:333.23ms
+step:525/2000 train_loss:2.5647 ce_loss:2.5647 kd_loss:0.0090 sample_rkd:0.0000 token_sim:0.0090 token_mag:0.0766 train_time:174587ms step_avg:332.55ms
+step:550/2000 train_loss:2.3223 ce_loss:2.3222 kd_loss:0.0073 sample_rkd:0.0000 token_sim:0.0073 token_mag:0.0794 train_time:182564ms step_avg:331.94ms
+step:575/2000 train_loss:2.4215 ce_loss:2.4215 kd_loss:0.0062 sample_rkd:0.0000 token_sim:0.0062 token_mag:0.0773 train_time:190616ms step_avg:331.51ms
+step:600/2000 train_loss:2.5078 ce_loss:2.5078 kd_loss:0.0055 sample_rkd:0.0000 token_sim:0.0055 token_mag:0.0720 train_time:198573ms step_avg:330.95ms
+step:625/2000 train_loss:2.4394 ce_loss:2.4393 kd_loss:0.0046 sample_rkd:0.0000 token_sim:0.0046 token_mag:0.0737 train_time:206533ms step_avg:330.45ms
+step:650/2000 train_loss:2.3367 ce_loss:2.3367 kd_loss:0.0042 sample_rkd:0.0000 token_sim:0.0042 token_mag:0.0682 train_time:214597ms step_avg:330.15ms
+step:675/2000 train_loss:2.2816 ce_loss:2.2816 kd_loss:0.0035 sample_rkd:0.0000 token_sim:0.0035 token_mag:0.0636 train_time:222600ms step_avg:329.78ms
+step:700/2000 train_loss:2.4095 ce_loss:2.4095 kd_loss:0.0029 sample_rkd:0.0000 token_sim:0.0029 token_mag:0.0659 train_time:230560ms step_avg:329.37ms
+step:725/2000 train_loss:2.4073 ce_loss:2.4073 kd_loss:0.0026 sample_rkd:0.0000 token_sim:0.0026 token_mag:0.0644 train_time:238583ms step_avg:329.08ms
+step:750/2000 train_loss:2.3366 ce_loss:2.3366 kd_loss:0.0024 sample_rkd:0.0000 token_sim:0.0024 token_mag:0.0627 train_time:246563ms step_avg:328.75ms
+step:750/2000 val_loss:2.3640 val_bpb:1.4001 train_time:246573ms step_avg:328.76ms
+step:775/2000 train_loss:2.4341 ce_loss:2.4341 kd_loss:0.0022 sample_rkd:0.0000 token_sim:0.0022 token_mag:0.0626 train_time:254612ms step_avg:328.53ms
+step:800/2000 train_loss:2.2890 ce_loss:2.2890 kd_loss:0.0018 sample_rkd:0.0000 token_sim:0.0018 token_mag:0.0603 train_time:262572ms step_avg:328.21ms
+step:825/2000 train_loss:2.3749 ce_loss:2.3749 kd_loss:0.0018 sample_rkd:0.0000 token_sim:0.0018 token_mag:0.0607 train_time:270547ms step_avg:327.94ms
+step:850/2000 train_loss:2.4673 ce_loss:2.4673 kd_loss:0.0013 sample_rkd:0.0000 token_sim:0.0013 token_mag:0.0611 train_time:278576ms step_avg:327.74ms
+step:875/2000 train_loss:2.3112 ce_loss:2.3112 kd_loss:0.0014 sample_rkd:0.0000 token_sim:0.0014 token_mag:0.0587 train_time:286611ms step_avg:327.56ms
+step:900/2000 train_loss:2.3542 ce_loss:2.3542 kd_loss:0.0014 sample_rkd:0.0000 token_sim:0.0014 token_mag:0.0602 train_time:294582ms step_avg:327.31ms
+step:925/2000 train_loss:2.2776 ce_loss:2.2776 kd_loss:0.0012 sample_rkd:0.0000 token_sim:0.0012 token_mag:0.0637 train_time:302554ms step_avg:327.09ms
+step:950/2000 train_loss:2.3658 ce_loss:2.3658 kd_loss:0.0011 sample_rkd:0.0000 token_sim:0.0011 token_mag:0.0601 train_time:310536ms step_avg:326.88ms
+step:975/2000 train_loss:2.2762 ce_loss:2.2762 kd_loss:0.0010 sample_rkd:0.0000 token_sim:0.0010 token_mag:0.0610 train_time:318548ms step_avg:326.72ms
+step:1000/2000 train_loss:2.3090 ce_loss:2.3090 kd_loss:0.0009 sample_rkd:0.0000 token_sim:0.0009 token_mag:0.0581 train_time:326518ms step_avg:326.52ms
+step:1000/2000 val_loss:2.3003 val_bpb:1.3624 train_time:326527ms step_avg:326.53ms
+step:1025/2000 train_loss:2.3348 ce_loss:2.3347 kd_loss:0.0010 sample_rkd:0.0000 token_sim:0.0010 token_mag:0.0591 train_time:334479ms step_avg:326.32ms
+step:1050/2000 train_loss:2.3917 ce_loss:2.3917 kd_loss:0.0009 sample_rkd:0.0000 token_sim:0.0009 token_mag:0.0564 train_time:342439ms step_avg:326.13ms
+step:1075/2000 train_loss:2.2252 ce_loss:2.2252 kd_loss:0.0009 sample_rkd:0.0000 token_sim:0.0009 token_mag:0.0574 train_time:350401ms step_avg:325.95ms
+step:1100/2000 train_loss:2.2626 ce_loss:2.2626 kd_loss:0.0009 sample_rkd:0.0000 token_sim:0.0009 token_mag:0.0582 train_time:358475ms step_avg:325.89ms
+step:1125/2000 train_loss:2.3224 ce_loss:2.3224 kd_loss:0.0007 sample_rkd:0.0000 token_sim:0.0007 token_mag:0.0550 train_time:366445ms step_avg:325.73ms
+step:1150/2000 train_loss:2.2675 ce_loss:2.2675 kd_loss:0.0008 sample_rkd:0.0000 token_sim:0.0008 token_mag:0.0606 train_time:374455ms step_avg:325.61ms
+step:1175/2000 train_loss:2.2357 ce_loss:2.2357 kd_loss:0.0007 sample_rkd:0.0000 token_sim:0.0007 token_mag:0.0572 train_time:382418ms step_avg:325.46ms
+step:1200/2000 train_loss:2.2629 ce_loss:2.2629 kd_loss:0.0007 sample_rkd:0.0000 token_sim:0.0007 token_mag:0.0568 train_time:390405ms step_avg:325.34ms
+step:1225/2000 train_loss:2.2944 ce_loss:2.2944 kd_loss:0.0007 sample_rkd:0.0000 token_sim:0.0007 token_mag:0.0571 train_time:398409ms step_avg:325.23ms
+step:1250/2000 train_loss:2.2077 ce_loss:2.2077 kd_loss:0.0007 sample_rkd:0.0000 token_sim:0.0007 token_mag:0.0561 train_time:406392ms step_avg:325.11ms
+step:1250/2000 val_loss:2.2572 val_bpb:1.3368 train_time:406398ms step_avg:325.12ms
+step:1275/2000 train_loss:2.2610 ce_loss:2.2610 kd_loss:0.0006 sample_rkd:0.0000 token_sim:0.0006 token_mag:0.0567 train_time:414350ms step_avg:324.98ms
+step:1300/2000 train_loss:2.2910 ce_loss:2.2910 kd_loss:0.0006 sample_rkd:0.0000 token_sim:0.0006 token_mag:0.0579 train_time:422353ms step_avg:324.89ms
+step:1325/2000 train_loss:2.2127 ce_loss:2.2127 kd_loss:0.0006 sample_rkd:0.0000 token_sim:0.0006 token_mag:0.0575 train_time:430362ms step_avg:324.80ms
+step:1350/2000 train_loss:2.1613 ce_loss:2.1613 kd_loss:0.0006 sample_rkd:0.0000 token_sim:0.0006 token_mag:0.0577 train_time:438475ms step_avg:324.80ms
+step:1375/2000 train_loss:2.2830 ce_loss:2.2830 kd_loss:0.0006 sample_rkd:0.0000 token_sim:0.0006 token_mag:0.0542 train_time:446501ms step_avg:324.73ms
+step:1400/2000 train_loss:2.2850 ce_loss:2.2850 kd_loss:0.0005 sample_rkd:0.0000 token_sim:0.0005 token_mag:0.0543 train_time:454493ms step_avg:324.64ms
+step:1425/2000 train_loss:2.2455 ce_loss:2.2455 kd_loss:0.0006 sample_rkd:0.0000 token_sim:0.0006 token_mag:0.0551 train_time:462520ms step_avg:324.58ms

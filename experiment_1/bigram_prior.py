@@ -1077,7 +1077,8 @@ def main() -> None:
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
-        alpha_value = get_alpha(step, max_step=args.prior_max_step, alpha_start=args.prior_alpha_start)
+        update_step = step
+        alpha_value = get_alpha(update_step, max_step=args.prior_max_step, alpha_start=args.prior_alpha_start)
         prior_alpha = torch.tensor(alpha_value, device=device, dtype=torch.float32)
         for micro_step in range(grad_accum_steps):
             if distributed:
@@ -1113,6 +1114,7 @@ def main() -> None:
         if should_log_train:
             log0(
                 f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
+                f"prior_alpha:{alpha_value:.6f} "
                 f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
             )
 
