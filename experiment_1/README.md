@@ -2,6 +2,15 @@
 
 Give the student a frozen bigram prior from the training data and add it directly to the model logits.
 
+## Contents
+
+- [How the bigram prior is created](#how-the-bigram-prior-is-created)
+- [How the prior is loaded into the experiment](#how-the-prior-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 2](#how-this-led-to-experiment-2)
+
 ## How the bigram prior is created
 
 The bigram table is created by `data/bigram_prior_extract.py`.
@@ -69,6 +78,12 @@ The meaningful changes in `experiment_1/bigram_prior.py` are:
 
 - `../data/bigram_prior_extract.py`: creates the sparse smoothed bigram prior file.
 - `bigram_prior.py`: experiment script that loads and injects the prior.
+
+## Results
+
+![Experiment 1 validation BPB against baseline](figures/experiment_1_baseline_vs_small_exp_1_750.png)
+
+In the matched 1000-step smoke run, direct bigram prior injection underperformed the baseline. The baseline reached `1.3768` validation BPB, while `small_exp_1_750` reached `1.4118`, a `0.0350` BPB disadvantage for Experiment 1.
 
 ## How this led to experiment 2
 

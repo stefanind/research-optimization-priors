@@ -9,6 +9,17 @@ This experiment regularizes student weight matrices toward the teacher's princip
 
 The loss is added to normal cross-entropy with a warmup-scaled `SUBSPACE_LAMBDA`.
 
+## Contents
+
+- [How this came from experiment 7](#how-this-came-from-experiment-7)
+- [What changed from experiment 7](#what-changed-from-experiment-7)
+- [How the teacher prior is created](#how-the-teacher-prior-is-created)
+- [How the teacher is loaded into the experiment](#how-the-teacher-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 9](#how-this-led-to-experiment-9)
+
 ## How this came from experiment 7
 
 Experiment 7 tested teacher SVD as an initialization-only prior. Experiment 8 tested the complementary reg-only ablation: do not copy teacher weights into the student, but keep applying pressure toward the teacher's learned subspaces during training.
@@ -52,6 +63,12 @@ At each training step, the student matrix is projected onto the teacher's left a
 ## Important files
 
 - `subspace_reg.py`: experiment script.
+
+## Results
+
+![Experiment 8 validation BPB against baseline](figures/experiment_8_baseline_vs_small_exp_8.png)
+
+In the matched 1000-step smoke run, teacher subspace regularization improved over the baseline. The baseline reached `1.3768` validation BPB, while `small_exp_8` reached `1.3656`, a `0.0112` BPB improvement for Experiment 8.
 
 ## How this led to experiment 9
 

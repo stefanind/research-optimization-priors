@@ -9,6 +9,17 @@ The default target families are:
 
 This is an init-only teacher prior. After initialization, training proceeds normally.
 
+## Contents
+
+- [How this came from experiment 6](#how-this-came-from-experiment-6)
+- [What changed from experiment 6](#what-changed-from-experiment-6)
+- [How the teacher prior is created](#how-the-teacher-prior-is-created)
+- [How the teacher is loaded into the experiment](#how-the-teacher-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 8](#how-this-led-to-experiment-8)
+
 ## How this came from experiment 6
 
 Experiment 6 used the teacher dynamically during training by matching activation update directions. Experiment 7 stepped back to a simpler question: does the teacher's learned weight geometry help if it is only used to choose the student's starting point?
@@ -48,6 +59,12 @@ After that copy, the teacher is no longer used. The run trains with ordinary cro
 ## Important files
 
 - `teacher_svd_init.py`: experiment script.
+
+## Results
+
+![Experiment 7 validation BPB against baseline](figures/experiment_7_baseline_vs_small_exp_7.png)
+
+The teacher SVD initialization smoke run stopped at step `954` and reached `1.5902` validation BPB, underperforming the 1000-step baseline value of `1.3768`.
 
 ## How this led to experiment 8
 

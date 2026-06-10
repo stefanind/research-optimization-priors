@@ -6,6 +6,15 @@ This experiment turns the bigram prior from experiment 1 into a teacher distribu
 
 The prior still decays over training, but now it guides the model through the loss rather than directly changing the predictions.
 
+## Contents
+
+- [How this came from experiment 1](#how-this-came-from-experiment-1)
+- [What changed from experiment 1](#what-changed-from-experiment-1)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 3](#how-this-led-to-experiment-3)
+
 ## How this came from experiment 1
 
 Experiment 1 tested the strongest possible data-prior intervention: direct injection. The issue is that once this was removed or the decay is stronger, the loss would jump back up and so the model had to learn this info anyways. I thought it would learn it indirectly along with more nuance information the data provides. 
@@ -40,6 +49,12 @@ Therefore, instead of adding it straight into the logits, I added a KL term.
 
 - `../data/bigram_prior_extract.py`: creates the sparse smoothed bigram prior file.
 - `bigram_kl.py`: experiment script.
+
+## Results
+
+![Experiment 2 validation BPB against baseline](figures/experiment_2_baseline_vs_small_exp_2_500.png)
+
+In the matched 1000-step smoke run, bigram KL regularization finished essentially tied with the baseline, but slightly worse. The baseline reached `1.3768` validation BPB, while `small_exp_2_500` reached `1.3777`, a `0.0009` BPB disadvantage for Experiment 2.
 
 ## How this led to experiment 3
 

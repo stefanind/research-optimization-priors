@@ -7,6 +7,16 @@ This experiment combines the two teacher-weight priors from experiments 7 and 8:
 
 `init_plus_reg.py` contains both the `SVD_INIT_*` controls and the `SUBSPACE_*` controls. It applies teacher SVD initialization first, then extracts teacher principal subspaces and trains with the auxiliary subspace loss.
 
+## Contents
+
+- [How this came from experiment 8](#how-this-came-from-experiment-8)
+- [What changed from experiment 8](#what-changed-from-experiment-8)
+- [How the teacher prior is created](#how-the-teacher-prior-is-created)
+- [How the teacher is loaded into the experiment](#how-the-teacher-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [How this led to experiment 10](#how-this-led-to-experiment-10)
+
 ## How this came from experiment 8
 
 Experiment 7 asked whether teacher geometry helps as initialization. Experiment 8 asked whether teacher geometry helps as an ongoing constraint. Experiment 9 closes the ablation loop by testing the combination.

@@ -10,6 +10,17 @@ It supports three modes:
 
 The token-level path also logs a magnitude term so it is possible to see whether the student matches only neighborhoods or also relative activation scale.
 
+## Contents
+
+- [How this came from experiment 9](#how-this-came-from-experiment-9)
+- [What changed from experiment 9](#what-changed-from-experiment-9)
+- [How the teacher signal is created](#how-the-teacher-signal-is-created)
+- [How the teacher is loaded into the experiment](#how-the-teacher-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 11](#how-this-led-to-experiment-11)
+
 ## How this came from experiment 9
 
 Experiments 7 through 9 tested teacher information stored in weights and subspaces. Experiment 10 moved to teacher behavior on data: what relationships does the teacher create among tokens and samples?
@@ -50,6 +61,12 @@ The student path returns CE loss plus a selected hidden layer. The teacher path 
 ## Important files
 
 - `relational_kd.py`: same-size relational KD script.
+
+## Results
+
+![Experiment 10 validation BPB against baseline](figures/experiment_10_baseline_vs_small_exp_10.png)
+
+The same-size relational KD smoke run stopped at step `924` and reached `1.3558` validation BPB. Even before completing the full 1000-step comparison, this was better than the 1000-step baseline value of `1.3768`.
 
 ## How this led to experiment 11
 

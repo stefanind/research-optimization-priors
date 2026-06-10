@@ -11,6 +11,17 @@ It then compares student and teacher deltas for selected layer pairs using:
 - direction loss: `1 - cosine_similarity(delta_student, delta_teacher)`
 - optional magnitude loss: MSE between log delta norms
 
+## Contents
+
+- [How this came from experiment 5](#how-this-came-from-experiment-5)
+- [What changed from experiment 5](#what-changed-from-experiment-5)
+- [How the teacher signal is created](#how-the-teacher-signal-is-created)
+- [How the teacher is loaded into the experiment](#how-the-teacher-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 7](#how-this-led-to-experiment-7)
+
 ## How this came from experiment 5
 
 Experiment 5 was still a data-prior method: a compact bigram transition module. The next idea was that a trained teacher contains richer information than any bigram table, especially about how representations should transform inside the network.
@@ -50,6 +61,20 @@ During training, the teacher runs under `torch.no_grad()` on the same batch as t
 ## Important files
 
 - `teacher_directional.py`: experiment script.
+
+## Results
+
+### Directional Loss
+
+![Experiment 6 directional validation BPB against baseline](figures/experiment_6_directional_vs_baseline.png)
+
+The directional-only run stopped at step `581` and reached `1.4334` validation BPB. Around the same budget, this is close to the baseline's step-600 value of `1.4414`, but the run did not complete the full 1000-step smoke comparison.
+
+### Magnitude Loss
+
+![Experiment 6 magnitude validation BPB against baseline](figures/experiment_6_magnitude_vs_baseline.png)
+
+The magnitude-only run stopped at step `954` and reached `1.4884` validation BPB, underperforming the 1000-step baseline value of `1.3768`.
 
 ## How this led to experiment 7
 

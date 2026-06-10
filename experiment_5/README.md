@@ -10,6 +10,17 @@ This experiment adds a trainable low-rank token-to-token transition module. Inst
 
 For each token position, the previous token selects a row of `A`; that vector is multiplied by `B.T` to produce a vocabulary-sized logit correction.
 
+## Contents
+
+- [How this came from experiment 4](#how-this-came-from-experiment-4)
+- [What changed from experiment 4](#what-changed-from-experiment-4)
+- [How the adapter prior is created](#how-the-adapter-prior-is-created)
+- [How the prior is loaded into the experiment](#how-the-prior-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 6](#how-this-led-to-experiment-6)
+
 ## How this came from experiment 4
 
 Experiment 4 asked whether data co-occurrence geometry was useful as an initialization. Experiment 5 asked whether the same kind of structure should be an explicit model component that can adapt during training.
@@ -56,6 +67,12 @@ The meaningful changes in `experiment_5/trainable_low_rank_adapter_lg.py` are:
 - `../data/bigram_prior_extract.py`: creates the optional bigram initializer for the adapter.
 - `trainable_low_rank_adapter_lg.py`: experiment script.
 - `low_rank_adapter_10m.txt`
+
+## Results
+
+![Experiment 5 validation BPB against baseline](figures/experiment_5_baseline_vs_small_exp_5.png)
+
+In the matched 1000-step smoke run, the trainable low-rank bigram adapter improved slightly over the baseline. The baseline reached `1.3768` validation BPB, while `small_exp_5` reached `1.3735`, a `0.0033` BPB improvement for Experiment 5.
 
 ## How this led to experiment 6
 
