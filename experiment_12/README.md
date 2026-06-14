@@ -6,6 +6,17 @@ This experiment implements classic teacher-student logit distillation. `classic_
 
 The temperature is controlled by `LOGIT_KD_TEMP`.
 
+## Contents
+
+- [How this came from experiment 11](#how-this-came-from-experiment-11)
+- [What changed from experiment 11](#what-changed-from-experiment-11)
+- [How the teacher signal is created](#how-the-teacher-signal-is-created)
+- [How the teacher is loaded into the experiment](#how-the-teacher-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 13](#how-this-led-to-experiment-13)
+
 ## How this came from experiment 11
 
 Experiment 10 tested hidden relational geometry. Experiment 11 tested hidden-to-embedding anchor distributions. Experiment 12 established the standard output distribution baseline so the hidden state methods could be compared against a familiar teacher signal.
@@ -45,6 +56,12 @@ The student and teacher both expose `forward_logits(...)`. The student CE is com
 ## Important files
 
 - `classic_logit_kd.py`: same-size logit KD script.
+
+## Results
+
+![Experiment 12 validation BPB against baseline](figures/experiment_12_baseline_vs_small_exp_12.png)
+
+In the matched 1000-step smoke run, classic same-size logit KD improved slightly over the baseline. The baseline reached `1.3768` validation BPB, while `small_exp_12` reached `1.3737`, a `0.0031` BPB improvement for Experiment 12.
 
 ## How this led to experiment 13
 

@@ -10,6 +10,17 @@ This experiment extends relational KD to a larger teacher model. `bigteacher_rel
 
 Because raw hidden dimensions differ between teacher and student, this experiment focuses on relational quantities such as token-to-token similarity structure rather than direct activation matching.
 
+## Contents
+
+- [How this came from experiment 12](#how-this-came-from-experiment-12)
+- [What changed from experiment 12](#what-changed-from-experiment-12)
+- [How the teacher signal is created](#how-the-teacher-signal-is-created)
+- [How the teacher is loaded into the experiment](#how-the-teacher-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 14](#how-this-led-to-experiment-14)
+
 ## How this came from experiment 12
 
 Experiment 12 used same size logit KD as a standard baseline. The next question was whether a larger teacher could provide a better signal, especially for hidden state relational KD where the teacher's internal representation might be richer.
@@ -49,6 +60,12 @@ Student hidden states come from `RELKD_LAYER`; teacher hidden states come from `
 ## Important files
 
 - `bigteacher_relational_kd.py`: largeteacher relational KD script.
+
+## Results
+
+![Experiment 13 validation BPB against baseline](figures/experiment_13_baseline_vs_small_exp_13.png)
+
+In the matched 1000-step smoke run, relational KD from the larger teacher improved over the baseline. The baseline reached `1.3768` validation BPB, while `small_exp_13` reached `1.3538`, a `0.0230` BPB improvement for Experiment 13.
 
 ## How this led to experiment 14
 

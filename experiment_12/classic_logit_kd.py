@@ -83,8 +83,8 @@ class Hyperparameters:
     # Classic teacher-student logit KL distillation.
     # Set LOGIT_KD_LAMBDA=0.0 to run the original CE-only baseline.
     logit_kd_teacher_path = os.environ.get("LOGIT_KD_TEACHER_PATH", "./small_teacher.pt")
-    logit_kd_lambda = float(os.environ.get("LOGIT_KD_LAMBDA", "0.0"))
-    logit_kd_temp = float(os.environ.get("LOGIT_KD_TEMP", "2.0"))
+    logit_kd_lambda = float(os.environ.get("LOGIT_KD_LAMBDA", "0.01"))
+    logit_kd_temp = float(os.environ.get("LOGIT_KD_TEMP", "4.0"))
 
 # -----------------------------
 # MUON OPTIMIZER 

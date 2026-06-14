@@ -6,6 +6,17 @@ This experiment distills hidden states through their similarity to teacher token
 
 This can be read as anchor-neighborhood distillation: the student should place each hidden state near the same teacher-token anchors as the teacher does.
 
+## Contents
+
+- [How this came from experiment 10](#how-this-came-from-experiment-10)
+- [What changed from experiment 10](#what-changed-from-experiment-10)
+- [How the teacher signal is created](#how-the-teacher-signal-is-created)
+- [How the teacher is loaded into the experiment](#how-the-teacher-is-loaded-into-the-experiment)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Important files](#important-files)
+- [Results](#results)
+- [How this led to experiment 12](#how-this-led-to-experiment-12)
+
 ## How this came from experiment 10
 
 Experiment 10 compared hidden states by their pairwise geometry within a batch or sequence. Experiment 11 asked whether a more stable reference frame would help: instead of comparing each token only to other current tokens, compare it to the teacher's whole embedding vocabulary.
@@ -46,6 +57,20 @@ For each hidden vector, both student and teacher similarities are computed again
 ## Important files
 
 - `teacher_embd_kl.py`: activation embedding KD script.
+
+## Results
+
+### Embedding KL, No Magnitude
+
+![Experiment 11 embedding KL without magnitude validation BPB against baseline](figures/experiment_11_embed_kl_vs_baseline.png)
+
+In the matched 1000-step smoke run, embedding-anchor KL without magnitude matching improved over the baseline. This plot uses `small_exp_11.txt`. The baseline reached `1.3768` validation BPB, while `small_exp_11` reached `1.3589`, a `0.0179` BPB improvement for Experiment 11.
+
+### Embedding KL Plus Magnitude
+
+![Experiment 11 embedding KL plus magnitude validation BPB against baseline](figures/experiment_11_embed_kl_mag_vs_baseline.png)
+
+The magnitude variant finished essentially tied with the KL-only run. The baseline reached `1.3768` validation BPB, while `small_exp_11_mag` reached `1.3588`, a `0.0180` BPB improvement.
 
 ## How this led to experiment 12
 

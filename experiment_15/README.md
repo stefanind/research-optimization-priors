@@ -18,6 +18,13 @@ It supports:
 Experiment 15 asks whether a more internal signal is better: not the teacher's final answer, and not just one hidden state, but the transformation the teacher applies between two hidden states.
 
 
+## Contents
+
+- [How the teacher signal is created](#how-the-teacher-signal-is-created)
+- [Code changes from `train_gpt.py`](#code-changes-from-train_gptpy)
+- [Results](#results)
+- [How this led to Experiment 16](#how-this-led-to-experiment-16)
+
 ## How the teacher signal is created
 
 The teacher signal is produced from a frozen teacher checkpoint on each training batch. The script captures two hidden states from the student and two hidden states from the teacher:
@@ -39,6 +46,12 @@ It then compares the transformation across that span. `delta_rel` compares chang
 - Constructed and froze a larger teacher model with independently configured shape.
 - Changed the training objective to `CE + TRANSKD_LAMBDA * transformation_KD`.
 - Logged relation norms, direction norms, norm ratios, and per-mode KD components.
+
+## Results
+
+![Experiment 15 validation BPB against baseline](figures/experiment_15_baseline_vs_small_exp_15.png)
+
+In the matched 1000-step smoke run, big-teacher transformation KD improved over the baseline. The baseline reached `1.3768` validation BPB, while `small_exp_15` reached `1.3534`, a `0.0234` BPB improvement for Experiment 15.
 
 ## How this led to Experiment 16  
 
