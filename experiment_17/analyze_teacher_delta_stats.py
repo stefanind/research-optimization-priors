@@ -1,5 +1,5 @@
 """
-Analyze teacher residual-write statistics produced by collect_teacher_delta_stats.py.
+Analyze teacher residual-write statistics produced by compute_teacher_delta_stats.py.
 
 Outputs:
     layer_summary.csv
@@ -32,6 +32,31 @@ def safe_float(x: Tensor | float | int) -> float:
     if isinstance(x, Tensor):
         return float(x.detach().cpu().item())
     return float(x)
+
+
+def parse_exclude_dims(s: str) -> list[int]:
+    """Parse comma-separated hidden dimensions to remove from energy metrics."""
+    if not s:
+        return []
+    dims: list[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if part:
+            dims.append(int(part))
+    return sorted(set(dims))
+
+
+def remove_dims(x: Tensor, exclude_dims: list[int]) -> Tensor:
+    """Return x with excluded hidden dimensions removed."""
+    if not exclude_dims:
+        return x
+    hidden_dim = x.numel()
+    keep = torch.ones(hidden_dim, dtype=torch.bool, device=x.device)
+    for dim in exclude_dims:
+        if dim < 0 or dim >= hidden_dim:
+            raise ValueError(f"exclude dim {dim} is outside hidden dim range [0, {hidden_dim - 1}]")
+        keep[dim] = False
+    return x[keep]
 
 
 def energy_metrics(energy: Tensor) -> dict[str, float | int]:
@@ -75,7 +100,7 @@ def energy_metrics(energy: Tensor) -> dict[str, float | int]:
     }
 
 
-def analyze_component(component_name: str, component: dict[str, Any], top_k: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def analyze_component(component_name: str, component: dict[str, Any], top_k: int, exclude_dims: list[int]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     mean = component["mean"].double().cpu()
     mean_sq = component["mean_sq"].double().cpu()
     var = component["var"].double().cpu().clamp_min(0.0)
@@ -98,9 +123,25 @@ def analyze_component(component_name: str, component: dict[str, Any], top_k: int
         centered = energy_metrics(centered_energy)
         constant = energy_metrics(constant_energy)
 
+        raw_no_excluded = energy_metrics(remove_dims(raw_energy, exclude_dims))
+        centered_no_excluded = energy_metrics(remove_dims(centered_energy, exclude_dims))
+        constant_no_excluded = energy_metrics(remove_dims(constant_energy, exclude_dims))
+
         total_raw = raw_energy.sum().clamp_min(EPS)
         total_centered = centered_energy.sum().clamp_min(EPS)
         total_constant = constant_energy.sum()
+
+        raw_energy_no_excluded = remove_dims(raw_energy, exclude_dims)
+        centered_energy_no_excluded = remove_dims(centered_energy, exclude_dims)
+        constant_energy_no_excluded = remove_dims(constant_energy, exclude_dims)
+
+        total_raw_no_excluded = raw_energy_no_excluded.sum().clamp_min(EPS)
+        total_centered_no_excluded = centered_energy_no_excluded.sum().clamp_min(EPS)
+        total_constant_no_excluded = constant_energy_no_excluded.sum().clamp_min(EPS)
+
+        raw_energy_removed_frac = float(((total_raw - total_raw_no_excluded) / total_raw).item())
+        centered_energy_removed_frac = float(((total_centered - total_centered_no_excluded) / total_centered).item())
+        constant_energy_removed_frac = float(((total_constant - total_constant_no_excluded) / total_constant.clamp_min(EPS)).item())
 
         constant_energy_fraction = float((total_constant / total_raw).item())
         centered_energy_fraction = float((total_centered / total_raw).item())
@@ -128,6 +169,21 @@ def analyze_component(component_name: str, component: dict[str, Any], top_k: int
                 "raw_k90": raw["k90"],
                 "centered_k90": centered["k90"],
                 "constant_k90": constant["k90"],
+                "excluded_dims": ",".join(str(d) for d in exclude_dims),
+                "raw_k90_no_excluded": raw_no_excluded["k90"],
+                "centered_k90_no_excluded": centered_no_excluded["k90"],
+                "constant_k90_no_excluded": constant_no_excluded["k90"],
+                "raw_pr_no_excluded": raw_no_excluded["participation_ratio"],
+                "centered_pr_no_excluded": centered_no_excluded["participation_ratio"],
+                "constant_pr_no_excluded": constant_no_excluded["participation_ratio"],
+                "raw_top1_frac_no_excluded": raw_no_excluded["top1_frac"],
+                "centered_top1_frac_no_excluded": centered_no_excluded["top1_frac"],
+                "constant_top1_frac_no_excluded": constant_no_excluded["top1_frac"],
+                "raw_energy_removed_frac": raw_energy_removed_frac,
+                "centered_energy_removed_frac": centered_energy_removed_frac,
+                "constant_energy_removed_frac": constant_energy_removed_frac,
+                "raw_k90_jump_no_excluded": raw_no_excluded["k90"] - raw["k90"],
+                "centered_k90_jump_no_excluded": centered_no_excluded["k90"] - centered["k90"],
                 "raw_top1_frac": raw["top1_frac"],
                 "centered_top1_frac": centered["top1_frac"],
                 "constant_top1_frac": constant["top1_frac"],
@@ -158,6 +214,7 @@ def analyze_component(component_name: str, component: dict[str, Any], top_k: int
                     "component": component_name,
                     "layer": layer_idx,
                     "dim": dim_idx,
+                    "is_excluded": dim_idx in set(exclude_dims),
                     "selected_because": reason.rstrip(";"),
                     "mean": float(mean_l[dim_idx].item()),
                     "mean_abs": float(abs(mean_l[dim_idx].item())),
@@ -260,18 +317,21 @@ def make_report(path: Path, payload: dict[str, Any], layer_rows: list[dict[str, 
     lines.append("- `raw_k90`: number of dimensions needed to explain 90% of raw expected delta energy.")
     lines.append("- `centered_k90`: same, but after subtracting the mean write; this is the input-dependent part.")
     lines.append("- `raw_pr` / `centered_pr`: participation ratio of raw vs centered energy distributions.")
+    lines.append("- `*_no_excluded`: the same metric after removing the requested excluded dimension(s), default dim 690.")
+    lines.append("- `centered_energy_removed_frac`: how much input-dependent energy was carried by the excluded dimension(s).")
     lines.append("")
 
     lines.append("## Most suspicious constant/outlier rows")
     lines.append("")
     sorted_rows = sorted(layer_rows, key=lambda r: float(r["constant_energy_fraction"]), reverse=True)
     top_rows = sorted_rows[:20]
-    lines.append("| component | layer | constant_frac | raw_k90 | centered_k90 | raw_pr | centered_pr | constant_top_dim | raw_top1_frac |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| component | layer | constant_frac | raw_k90 | centered_k90 | raw_k90_no690 | centered_k90_no690 | centered_removed_frac | constant_top_dim | raw_top1_frac |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for row in top_rows:
         lines.append(
             "| {component} | {layer} | {constant_energy_fraction:.6f} | {raw_k90} | {centered_k90} | "
-            "{raw_pr:.2f} | {centered_pr:.2f} | {constant_top_dim} | {raw_top1_frac:.6f} |".format(**row)
+            "{raw_k90_no_excluded} | {centered_k90_no_excluded} | {centered_energy_removed_frac:.6f} | "
+            "{constant_top_dim} | {raw_top1_frac:.6f} |".format(**row)
         )
     lines.append("")
 
@@ -294,6 +354,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stats", required=True, help="Path to teacher_delta_stats.pt")
     parser.add_argument("--output-dir", default="outputs/activation_audit")
     parser.add_argument("--top-k-dims", type=int, default=10)
+    parser.add_argument("--exclude-dims", default="690", help="Comma-separated hidden dimensions to remove from extra no_excluded metrics, e.g. '690'")
     parser.add_argument("--no-plots", action="store_true")
     return parser.parse_args()
 
@@ -303,6 +364,7 @@ def main() -> None:
     stats_path = Path(args.stats)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    exclude_dims = parse_exclude_dims(args.exclude_dims)
 
     payload = torch.load(stats_path, map_location="cpu")
     if "components" not in payload:
@@ -311,7 +373,7 @@ def main() -> None:
     all_layer_rows: list[dict[str, Any]] = []
     all_dim_rows: list[dict[str, Any]] = []
     for component_name, component in payload["components"].items():
-        layer_rows, dim_rows = analyze_component(component_name, component, top_k=args.top_k_dims)
+        layer_rows, dim_rows = analyze_component(component_name, component, top_k=args.top_k_dims, exclude_dims=exclude_dims)
         all_layer_rows.extend(layer_rows)
         all_dim_rows.extend(dim_rows)
 
@@ -328,6 +390,7 @@ def main() -> None:
     print(f"wrote: {layer_csv}")
     print(f"wrote: {dim_csv}")
     print(f"wrote: {report_md}")
+    print(f"excluded dims for *_no_excluded metrics: {exclude_dims}")
     if not args.no_plots:
         print(f"wrote plots under: {output_dir / 'plots'}")
 
