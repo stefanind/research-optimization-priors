@@ -53,6 +53,12 @@ It then compares the transformation across that span. `delta_rel` compares chang
 
 In the matched 1000-step smoke run, big-teacher transformation KD improved over the baseline. The baseline reached `1.3768` validation BPB, while `small_exp_15` reached `1.3534`, a `0.0234` BPB improvement for Experiment 15.
 
+### 5000-step medium run
+
+![Experiment 15 medium validation BPB against medium baseline](figures/experiment_15_medium_vs_exp0_medium_5000.png)
+
+For the 5000-step medium run, `medium_exp_15` is compared against the Experiment 0 medium baseline, `medium_exp_0.txt`. At step `5000`, `medium_exp_15` reached `1.2478` validation BPB while `medium_exp_0` reached `1.2480`. Lower is better, so this is effectively tied, with `medium_exp_15` `0.0002` BPB lower than the baseline.
+
 ## How this led to Experiment 16  
 
 Between layer transforms, I noticed huge average norms for each token hidden state coming from the teacher. For instance, outside layer 8, the avg token norm being written into the residual stream was 4,000,000. I didn't fully understand this signal so I wanted to explore further. This is why experiment 16 is more of a diagnostic.

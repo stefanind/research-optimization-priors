@@ -68,6 +68,12 @@ The student path returns CE loss plus a selected hidden layer. The teacher path 
 
 The same-size relational KD smoke run stopped at step `924` and reached `1.3558` validation BPB. Even before completing the full 1000-step comparison, this was better than the 1000-step baseline value of `1.3768`.
 
+### 5000-step medium run
+
+![Experiment 10 medium validation BPB against medium baseline](figures/experiment_10_medium_vs_exp0_medium_5000.png)
+
+For the 5000-step medium run, `medium_exp_10` is compared against the Experiment 0 medium baseline, `medium_exp_0.txt`. At step `5000`, `medium_exp_10` reached `1.2483` validation BPB while `medium_exp_0` reached `1.2480`. Lower is better, so this is effectively tied, with `medium_exp_10` `0.0003` BPB higher than the baseline.
+
 ## How this led to experiment 11
 
 Relational KD compares hidden states to each other. The next idea was to compare each hidden state to a fixed set of semantic anchors: the teacher's token embeddings.

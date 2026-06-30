@@ -67,6 +67,12 @@ Student hidden states come from `RELKD_LAYER`; teacher hidden states come from `
 
 In the matched 1000-step smoke run, relational KD from the larger teacher improved over the baseline. The baseline reached `1.3768` validation BPB, while `small_exp_13` reached `1.3538`, a `0.0230` BPB improvement for Experiment 13.
 
+### 5000-step medium run
+
+![Experiment 13 medium validation BPB against medium baseline](figures/experiment_13_medium_vs_exp0_medium_5000.png)
+
+For the 5000-step medium run, `medium_exp_13` is compared against the Experiment 0 medium baseline, `medium_exp_0.txt`. At step `5000`, `medium_exp_13` reached `1.2481` validation BPB while `medium_exp_0` reached `1.2480`. Lower is better, so this is effectively tied, with `medium_exp_13` `0.0001` BPB higher than the baseline.
+
 ## How this led to experiment 14
 
 The results show similar performance to the smaller teacher, which is very odd. Therefore, I wanted to run a diagnostic with the logit kd using the big teacher. I am hoping that the performance is better than the smaller teacher for logit kd. 
